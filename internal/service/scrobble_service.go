@@ -10,50 +10,67 @@ import (
 	"github.com/mbagusaditya/scrobbles-cli/internal/model"
 )
 
-// ScrobbleService menangani seluruh business logic terkait scrobble:
-// menyimpan ke database dan orkestrasi sync dari Last.fm API.
 type ScrobbleService struct {
 	db     *sql.DB
 	client *lastfm.Client
 }
 
-// NewScrobbleService membuat instance ScrobbleService baru.
 func NewScrobbleService(database *sql.DB, client *lastfm.Client) *ScrobbleService {
 	return &ScrobbleService{db: database, client: client}
 }
 
-// SyncResult merangkum hasil satu kali proses sync.
+// MaxCustomRangeDays adalah batas maksimal rentang tanggal yang boleh
+// diminta untuk custom range sync (dipakai untuk validasi di cmd).
+const MaxCustomRangeDays = 7
+
 type SyncResult struct {
 	Inserted int
 	Skipped  int
 	Fetched  int
 }
 
-// Sync mengambil scrobble baru dari Last.fm sejak scrobble terakhir yang
-// tersimpan di database, lalu menyimpannya. Melakukan pagination otomatis
-// sampai seluruh halaman baru habis diambil.
-func (s *ScrobbleService) Sync(ctx context.Context) (*SyncResult, error) {
+// PageProgress berisi ringkasan hasil pemrosesan satu halaman, dikirim
+// ke ProgressFunc setelah tiap halaman selesai diambil dan disimpan.
+type PageProgress struct {
+	Page       int
+	TotalPages int
+	Fetched    int // jumlah track valid (non now-playing) di halaman ini
+	Inserted   int
+	Skipped    int
+}
+
+// ProgressFunc dipanggil setelah tiap halaman selesai diproses selama
+// FetchRange/SyncLatest berjalan. Boleh nil kalau tidak butuh feedback.
+// Service sengaja tidak melakukan print apapun sendiri -- itu tanggung
+// jawab pemanggil (cmd), service cuma melaporkan progress lewat callback.
+type ProgressFunc func(p PageProgress)
+
+// SyncLatest mengambil scrobble baru dari Last.fm sejak scrobble terakhir
+// yang tersimpan di database sampai saat ini. Kalau database masih kosong
+// (belum pernah sync sama sekali), otomatis mengambil dari awal history.
+func (s *ScrobbleService) SyncLatest(ctx context.Context, onProgress ProgressFunc) (*SyncResult, error) {
 	lastPlayedAt, err := s.getLastPlayedAt(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gagal mengambil timestamp scrobble terakhir: %w", err)
 	}
 
-	return s.syncFrom(ctx, lastPlayedAt)
+	return s.FetchRange(ctx, lastPlayedAt, time.Now(), onProgress)
 }
 
-// SyncFrom mengambil scrobble dari Last.fm sejak timestamp tertentu
-// (dipakai untuk backfill manual, misal via flag --from di CLI).
-// Kirim time.Time{} (zero value) untuk full backfill dari awal.
-func (s *ScrobbleService) SyncFrom(ctx context.Context, from time.Time) (*SyncResult, error) {
-	return s.syncFrom(ctx, from)
-}
-
-func (s *ScrobbleService) syncFrom(ctx context.Context, from time.Time) (*SyncResult, error) {
+// FetchRange mengambil seluruh scrobble dalam rentang [from, to] dari
+// Last.fm, melakukan pagination otomatis sampai seluruh halaman habis,
+// dan menyimpan hasilnya (duplikat otomatis di-skip). Ini adalah inti
+// mekanisme yang dipakai oleh semua mode sync (harian, mingguan, custom
+// range, maupun incremental via SyncLatest).
+//
+// Kirim time.Time{} (zero value) pada from untuk tidak membatasi batas
+// bawah (ambil dari awal history). onProgress boleh nil.
+func (s *ScrobbleService) FetchRange(ctx context.Context, from, to time.Time, onProgress ProgressFunc) (*SyncResult, error) {
 	result := &SyncResult{}
 	page := 1
 
 	for {
-		resp, err := s.client.GetRecentTracks(ctx, from, page)
+		resp, err := s.client.GetRecentTracks(ctx, from, to, page)
 		if err != nil {
 			return nil, fmt.Errorf("gagal fetch halaman %d dari Last.fm: %w", page, err)
 		}
@@ -69,6 +86,17 @@ func (s *ScrobbleService) syncFrom(ctx context.Context, from time.Time) (*SyncRe
 		result.Skipped += skipped
 
 		totalPages := resp.RecentTracks.Attr.TotalPagesInt()
+
+		if onProgress != nil {
+			onProgress(PageProgress{
+				Page:       page,
+				TotalPages: totalPages,
+				Fetched:    len(scrobbles),
+				Inserted:   inserted,
+				Skipped:    skipped,
+			})
+		}
+
 		if page >= totalPages {
 			break
 		}
@@ -78,9 +106,6 @@ func (s *ScrobbleService) syncFrom(ctx context.Context, from time.Time) (*SyncRe
 	return result, nil
 }
 
-// mapTracksToScrobbles mengonversi raw Track dari response Last.fm API
-// menjadi entity model.Scrobble. Track yang berstatus "now playing"
-// otomatis di-skip karena belum punya PlayedAt yang final.
 func mapTracksToScrobbles(tracks lastfm.TrackList) []*model.Scrobble {
 	scrobbles := make([]*model.Scrobble, 0, len(tracks))
 
@@ -91,8 +116,6 @@ func mapTracksToScrobbles(tracks lastfm.TrackList) []*model.Scrobble {
 
 		playedAt, err := t.PlayedAt()
 		if err != nil {
-			// Track tanpa timestamp valid (bukan now-playing tapi tetap
-			// gagal parse) di-skip, bukan bikin seluruh sync gagal.
 			continue
 		}
 
@@ -107,7 +130,6 @@ func mapTracksToScrobbles(tracks lastfm.TrackList) []*model.Scrobble {
 	return scrobbles
 }
 
-// insertScrobbles menyimpan banyak scrobble sekaligus dalam satu transaction.
 func (s *ScrobbleService) insertScrobbles(ctx context.Context, scrobbles []*model.Scrobble) (inserted int, skipped int, err error) {
 	if len(scrobbles) == 0 {
 		return 0, 0, nil
@@ -138,9 +160,6 @@ func (s *ScrobbleService) insertScrobbles(ctx context.Context, scrobbles []*mode
 	return inserted, skipped, nil
 }
 
-// insertScrobble menyisipkan satu scrobble. Memakai INSERT OR IGNORE
-// sehingga aman dipanggil berulang -> duplikat otomatis di-skip oleh
-// unique index idx_scrobble_logs_unique_event di level database.
 func (s *ScrobbleService) insertScrobble(ctx context.Context, tx *sql.Tx, sc *model.Scrobble) (bool, error) {
 	const query = `
 		INSERT OR IGNORE INTO scrobble_logs
@@ -170,9 +189,6 @@ func (s *ScrobbleService) insertScrobble(ctx context.Context, tx *sql.Tx, sc *mo
 	return affected > 0, nil
 }
 
-// getLastPlayedAt mengembalikan timestamp scrobble terbaru di database,
-// dipakai sebagai titik awal incremental sync. Time.Time{} (zero value)
-// berarti tabel masih kosong -> sync akan mengambil dari awal.
 func (s *ScrobbleService) getLastPlayedAt(ctx context.Context) (time.Time, error) {
 	const query = `SELECT MAX(played_at) FROM scrobble_logs`
 
