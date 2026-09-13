@@ -75,21 +75,38 @@ func (s *ScrobbleService) SyncLatest(ctx context.Context, onProgress ProgressFun
 // Kirim time.Time{} (zero value) pada from untuk tidak membatasi batas
 // bawah (ambil dari awal history). onProgress boleh nil.
 func (s *ScrobbleService) FetchRange(ctx context.Context, from, to time.Time, onProgress ProgressFunc) (*SyncResult, error) {
+	// Jika from kosong (misal user hanya isi --to), ambil titik awal dari scrobble terakhir di DB
+	if from.IsZero() {
+		lastPlayed, err := s.getLastPlayedAt(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("gagal mengambil timestamp scrobble terakhir: %w", err)
+		}
+		from = lastPlayed
+	}
+
 	result := &SyncResult{}
 	page := 1
 
 	for {
 		resp, err := s.client.GetRecentTracks(ctx, from, to, page)
 		if err != nil {
-			return nil, fmt.Errorf("gagal fetch halaman %d dari Last.fm: %w", page, err)
+			return result, fmt.Errorf("gagal fetch halaman %d dari Last.fm: %w", page, err)
+		}
+
+		// Jeda 500ms setelah fetch data agar mematuhi rate limit Last.fm
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-ctx.Done():
+			return result, ctx.Err()
 		}
 
 		scrobbles := mapTracksToScrobbles(resp.RecentTracks.Tracks)
 		result.Fetched += len(scrobbles)
 
+		// Insert dan commit langsung per halaman (batch)
 		inserted, skipped, err := s.insertScrobbles(ctx, scrobbles)
 		if err != nil {
-			return nil, fmt.Errorf("gagal insert batch halaman %d: %w", page, err)
+			return result, fmt.Errorf("gagal insert batch halaman %d: %w", page, err)
 		}
 		result.Inserted += inserted
 		result.Skipped += skipped

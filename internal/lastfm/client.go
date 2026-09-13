@@ -15,7 +15,7 @@ const (
 	baseURL      = "https://ws.audioscrobbler.com/2.0/"
 	defaultLimit = 200
 
-	maxRetries     = 4                      // total percobaan = maxRetries + 1
+	maxRetries     = 3                      // retry 3x jika gagal
 	retryBaseDelay = 500 * time.Millisecond // delay percobaan pertama
 )
 
