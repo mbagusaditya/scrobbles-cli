@@ -10,6 +10,15 @@ import (
 	"github.com/mbagusaditya/scrobbles-cli/internal/model"
 )
 
+type ListFilter struct {
+	Artist string
+	Album  string
+	From   time.Time
+	To     time.Time
+	Limit  int
+	Page   int
+}
+
 type ScrobbleService struct {
 	db     *sql.DB
 	client *lastfm.Client
@@ -202,4 +211,92 @@ func (s *ScrobbleService) getLastPlayedAt(ctx context.Context) (time.Time, error
 	}
 
 	return time.Unix(maxPlayedAt.Int64, 0).UTC(), nil
+}
+
+func (s *ScrobbleService) ListScrobbles(ctx context.Context, filter ListFilter) ([]*model.Scrobble, error) {
+	// 1. Normalisasi limit dan page ke offset SQL
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 50
+	} else if limit > 200 {
+		limit = 200
+	}
+
+	page := filter.Page
+	if page <= 0 {
+		page = 1
+	}
+	offset := (page - 1) * limit
+
+	// 2. Susun dynamic SQL query dan binding argumen
+	query := `
+		SELECT id, track_id, raw_title, raw_artist, raw_album, played_at, created_at
+		FROM scrobble_logs
+		WHERE 1=1
+	`
+	var args []any
+
+	if filter.Artist != "" {
+		query += " AND raw_artist = ?"
+		args = append(args, filter.Artist)
+	}
+
+	if filter.Album != "" {
+		query += " AND raw_album = ?"
+		args = append(args, filter.Album)
+	}
+
+	if !filter.From.IsZero() {
+		query += " AND played_at >= ?"
+		args = append(args, filter.From.Unix())
+	}
+
+	if !filter.To.IsZero() {
+		query += " AND played_at <= ?"
+		args = append(args, filter.To.Unix())
+	}
+
+	query += " ORDER BY played_at DESC LIMIT ? OFFSET ?"
+	args = append(args, limit, offset)
+
+	// 3. Eksekusi query
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("gagal query list scrobbles: %w", err)
+	}
+	defer rows.Close()
+
+	// 4. Scan baris ke struct model.Scrobble
+	var results []*model.Scrobble
+	for rows.Next() {
+		var (
+			sc          model.Scrobble
+			playedUnix  int64
+			createdUnix int64
+		)
+
+		err := rows.Scan(
+			&sc.ID,
+			&sc.TrackID,
+			&sc.RawTitle,
+			&sc.RawArtist,
+			&sc.RawAlbum,
+			&playedUnix,
+			&createdUnix,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("gagal scan scrobble: %w", err)
+		}
+
+		sc.PlayedAt = time.Unix(playedUnix, 0).Local()
+		sc.CreatedAt = time.Unix(createdUnix, 0).Local()
+
+		results = append(results, &sc)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterasi baris scrobbles: %w", err)
+	}
+
+	return results, nil
 }
