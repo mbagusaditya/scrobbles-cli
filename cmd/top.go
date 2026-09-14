@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -165,16 +167,23 @@ func runTop(cmd *cobra.Command, targetType string) error {
 		return humanizeError(err)
 	}
 
-	// 4. Tampilkan tabel output
+	// 4. Tampilkan tabel output yang rapi
 	fmt.Printf("=== Top %d %s (%s) ===\n\n", filter.Limit, targetType, periodLabel)
 	if len(items) == 0 {
 		fmt.Println("Tidak ada data scrobble pada periode ini.")
 		return nil
 	}
 
+	// Inisialisasi tabwriter: output ke os.Stdout, minwidth 0, tabwidth 0, padding 3 spasi
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+
 	for i, item := range items {
-		fmt.Printf("%2d. %-35s %s scrobbles\n", i+1, item.Name, formatNumber(item.Count))
+		paddedName := padRight(item.Name, 32)
+		fmt.Printf(" %2d. %s  %4s scrobbles\n", i+1, paddedName, formatNumber(item.Count))
 	}
+
+	// Wajib Flush() untuk mendorong buffer ke layar terminal
+	_ = w.Flush()
 
 	return nil
 }
