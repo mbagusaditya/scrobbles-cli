@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -26,7 +25,7 @@ func init() {
 }
 
 func runResolve(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	ctx := cmd.Context()
 
 	fmt.Println("Memeriksa scrobble logs yang belum terhubung (unlinked)...")
 
@@ -39,7 +38,7 @@ func runResolve(cmd *cobra.Command, args []string) error {
 
 	res, err := app.scrobbleService.ResolveUnlinkedScrobbles(ctx, resolveBatchSize, onProgress)
 	if err != nil {
-		return fmt.Errorf("proses resolusi gagal: %w", err)
+		return humanizeError(err)
 	}
 
 	if res.TotalUpdatedLogs == 0 {

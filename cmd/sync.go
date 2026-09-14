@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -78,7 +77,7 @@ func init() {
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	ctx := cmd.Context()
 	now := time.Now()
 
 	var fromTime, toTime time.Time
@@ -146,21 +145,20 @@ func runSync(cmd *cobra.Command, args []string) error {
 	}
 
 	result, err := app.scrobbleService.FetchRange(ctx, fromTime, toTime, onProgress)
-	sp.stopSpinner() // Sekarang aman dipanggil kembali berkat sync.Once
+	sp.stopSpinner()
 
 	if err != nil {
-		// ... error handling
 		if result != nil && (result.Inserted > 0 || result.Skipped > 0) {
-			fmt.Printf("\n⚠️  Proses terhenti karena kesalahan: %v\n", err)
+			fmt.Printf("\n⚠️  Proses terhenti karena kesalahan:\n")
 			fmt.Printf("Sebagian data berhasil diamankan -> Tersimpan: %d, Dilewati: %d\n", result.Inserted, result.Skipped)
 		}
-		return err
+		return humanizeError(err)
 	}
 
 	fmt.Println("\nSinkronisasi selesai!")
-	fmt.Printf("Total Diambil : %d\n", result.Fetched)
-	fmt.Printf("Total Tersimpan: %d\n", result.Inserted)
-	fmt.Printf("Total Duplikat : %d\n", result.Skipped)
+	fmt.Printf("Total Diambil   : %s\n", formatNumber(result.Fetched))
+	fmt.Printf("Total Tersimpan : %s\n", formatNumber(result.Inserted))
+	fmt.Printf("Total Duplikat  : %s\n", formatNumber(result.Skipped))
 
 	return nil
 }

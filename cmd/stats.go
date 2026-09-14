@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -40,7 +39,7 @@ func init() {
 }
 
 func runStats(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	ctx := cmd.Context()
 	now := time.Now()
 
 	// 1. Validasi mutual exclusion untuk preset flag
@@ -133,7 +132,7 @@ func runStats(cmd *cobra.Command, args []string) error {
 
 	stats, err := app.scrobbleService.GetStats(ctx, filter)
 	if err != nil {
-		return fmt.Errorf("gagal mengambil statistik: %w", err)
+		return humanizeError(err)
 	}
 
 	// 4. Render output ke terminal

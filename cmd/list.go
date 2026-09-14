@@ -94,8 +94,11 @@ func runList(cmd *cobra.Command, args []string) error {
 
 	// 5. Eksekusi query via scrobbleService (instance yang sudah di-wire di root.go)
 	scrobbles, err := app.scrobbleService.ListScrobbles(ctx, filter)
+	// if err != nil {
+	// 	return fmt.Errorf("gagal mengambil data scrobble: %w", err)
+	// }
 	if err != nil {
-		return fmt.Errorf("gagal mengambil data scrobble: %w", err)
+		return humanizeError(err)
 	}
 
 	// 6. Handle hasil kosong

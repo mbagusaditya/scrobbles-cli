@@ -36,6 +36,8 @@ scrobble musik dari Last.fm ke database Turso kamu sendiri.`,
 		}
 		return nil
 	},
+	SilenceErrors: true,
+	SilenceUsage:  true,
 }
 
 // initApp memuat konfigurasi dari .env, membuka koneksi ke database
