@@ -2,50 +2,56 @@
 
 ## Konteks
 
-CLI untuk mengurus data pribadi (anime, scrobble musik Last.fm, dll) yang sebelumnya sudah punya web app pakai **Drizzle ORM + SQLite/Turso**. CLI ini dibuat terpisah pakai **Go**, fokus v1 ke domain **scrobble Last.fm**, terhubung ke database Turso yang sama dengan web app.
+CLI untuk manajemen data personal (anime, scrobble musik Last.fm, catatan, dll) yang berbagi database **Turso/SQLite** dengan web app (Drizzle ORM).
+CLI Go ini bertindak sebagai **data ingestion, background synchronization, dan maintenance engine** untuk domain musik/scrobble Last.fm.
 
 ## Tech Stack
 
 - **Bahasa**: Go 1.25
-- **Database**: Turso (libSQL), pakai **native driver** `tursodatabase/libsql-client-go` (no CGO, tanpa embedded replica)
-- **CLI framework**: `spf13/cobra`
-- **Config**: `.env` file via `joho/godotenv`
-- **UUID**: `google/uuid` (ID di-generate di level aplikasi, bukan default DB, konsisten dengan pola `crypto.randomUUID()` di Drizzle)
+- **Database**: Turso (libSQL), driver native `tursodatabase/libsql-client-go` (pure Go, no CGO)
+- **CLI Framework**: `spf13/cobra`
+- **Config**: `.env` via `joho/godotenv`
+- **UUID**: `google/uuid` (UUID v4 string 36 karakter, konsisten dengan `crypto.randomUUID()` di Drizzle)
 
 ## Module: `github.com/mbagusaditya/scrobbles-cli`
 
-## Schema Relevan (dari Drizzle, sisi web — read-only reference)
+## Schema Relevan (Drizzle ORM Web — Read-Only Reference)
 
-Tabel yang berhubungan dengan domain musik:
+- `artists`: `id (UUID PK)`, `name (TEXT UNIQUE)`, `mbid`, `imageUrl`, `createdAt`
+- `tracks`: `id (UUID PK)`, `artistId (FK → artists)`, `title`, `albumName`, `durationMs`, `coverUrl`, `createdAt`
+    - Unique Constraint: `(artistId, title, albumName)`
+- `scrobble_logs`: `id (UUID PK)`, `trackId (FK nullable → tracks)`, `rawTitle`, `rawArtist`, `rawAlbum`, `playedAt (Unix Epoch Seconds)`, `createdAt`
+    - Unique Index: `(rawArtist, rawTitle, playedAt)`
+    - **Partial Indexes**:
+        - `idx_scrobble_logs_unresolved`: `(rawArtist, rawTitle) WHERE trackId IS NULL` (optimasi resolver)
+        - `idx_scrobble_logs_valid_albums`: `(rawAlbum) WHERE rawAlbum IS NOT NULL AND rawAlbum != ''` (optimasi distinct album stats)
 
-- `artists` — id, name (unique), mbid, imageUrl, createdAt
-- `tracks` — id, artistId (FK), title, albumName, durationMs, coverUrl, createdAt (album BUKAN tabel terpisah, cuma kolom)
-- `scrobble_logs` — id, trackId (FK nullable → tracks), rawTitle, rawArtist, rawAlbum, playedAt, createdAt. Unique index `(rawArtist, rawTitle, playedAt)` untuk cegah duplikat dari Last.fm.
-
-**Catatan penting**: kolom `mode: 'timestamp'` di Drizzle SQLite disimpan sebagai **unix epoch integer (detik)**, bukan string ISO — CLI Go ini menyesuaikan (pakai `.Unix()` manual saat insert, `time.Unix()` saat baca).
+**Catatan Timestamp**: SQLite Turso menyimpan waktu sebagai Unix Epoch integer (detik). Di Go, konversi manual menggunakan `.Unix()` saat write dan `time.Unix()` saat read.
 
 ## Arsitektur (4 Layer)
 
+```text
 scrobbles-cli/
 ├── .env.example
 ├── go.mod
 ├── main.go
 ├── cmd/
-│ ├── root.go → root command + wiring dependency (config→db→lastfm→service)
-│ └── sync.go → subcommand sync (flags: --range, --from, --to)
+│   ├── root.go              → wiring dependency (config → db → lastfm → service)
+│   ├── sync.go              → subcommand sync (--range latest|day|week, --from, --to)
+│   ├── list.go              → subcommand list log scrobble dengan filter tanggal & limit
+│   ├── stats.go             → subcommand agregasi stats (preset --day/week/month/year, custom range, all-time)
+│   ├── resolve.go           → subcommand deduplikasi & normalisasi master artists/tracks
+│   └── version.go           → subcommand informasi binary, commit, & build date via ldflags
 └── internal/
-├── config/config.go → load & validasi .env
-├── model/
-│ ├── helper.go → toNullString() shared helper
-│ ├── artist.go → struct Artist + NewArtist()
-│ ├── track.go → struct Track + NewTrack()
-│ └── scrobble.go → struct Scrobble + NewScrobble()
-├── lastfm/
-│ ├── types.go → response types Last.fm API (handle gotcha: single-object vs array track)
-│ └── client.go → HTTP client, retry exponential backoff, build URL
-├── db/db.go → HANYA Connect(), tidak ada query logic
-└── service/
-└── scrobble_service.go → business logic: mapping API→entity, orkestrasi sync, query DB
+    ├── config/config.go     → validasi environment variables
+    ├── model/               → entity murni tanpa DB logic (Artist, Track, Scrobble)
+    ├── lastfm/              → HTTP client, rate throttle (500ms), retry exponential backoff
+    ├── db/db.go             → koneksi database Turso murni
+    └── service/
+        ├── scrobble_service.go  → ingestion, fetch pagination, insert ignore
+        ├── stat_service.go      → kalkulasi ringkasan metrik (all-time & ranged)
+        └── resolver_service.go  → batch processing unlinked logs -> master artists/tracks
+```
 
 **Prinsip pembagian layer** (disepakati eksplisit):
 
@@ -57,48 +63,20 @@ scrobbles-cli/
 
 ## Keputusan Desain Kunci
 
-| Area                           | Keputusan                                                                                                                        |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
-| Resolver track/artist matching | **Ditunda** — `trackId` di `scrobble_logs` selalu NULL untuk sekarang                                                            |
-| Dedup insert                   | `INSERT OR IGNORE` memanfaatkan unique index yang sudah ada di schema                                                            |
-| Retry API                      | Exponential backoff (500ms, 1s, 2s, 4s...), retry hanya untuk network error/429/5xx, max 4x retry                                |
-| Timeout                        | Per-request saja (15 detik di `http.Client`), tidak ada timeout keseluruhan command                                              |
-| Custom range                   | Maksimal 7 hari (`service.MaxCustomRangeDays`), divalidasi & ditolak keras di `cmd` kalau lebih                                  |
-| Album kosong dari API          | Disimpan sebagai `NULL` (bukan string kosong)                                                                                    |
-| Now-playing track dari API     | Di-skip saat sync (belum final scrobble, belum ada timestamp)                                                                    |
-| Relasi antar entity di Go      | Tidak pakai nested struct/pointer ala ORM — cuma foreign key ID; kalau butuh JOIN, buat struct baru khusus untuk hasil query itu |
-
-## Status Implementasi
-
-✅ **Selesai:**
-
-- `internal/model` — `Artist`, `Track`, `Scrobble` (entity + constructor dengan auto UUID/timestamp)
-- `internal/config` — load & validasi `.env` (`DATABASE_URL`, `DATABASE_AUTH_TOKEN`, `LASTFM_API_KEY`, `LASTFM_SHARED_SECRET`, `LASTFM_USERNAME`)
-- `internal/lastfm` — client dengan retry + support parameter `from`/`to`
-- `internal/db` — `Connect()`
-- `internal/service` — `ScrobbleService` dengan method:
-    - `SyncLatest(ctx, onProgress)` — incremental dari scrobble terakhir di DB sampai sekarang
-    - `FetchRange(ctx, from, to, onProgress)` — inti mekanisme (pagination + insert), dipakai semua mode
-    - `ProgressFunc`/`PageProgress` — callback progress per halaman (service tidak print sendiri)
-- `cmd/root.go` — wiring dependency + `Execute()`
-- `cmd/sync.go` — subcommand dengan flag `--range latest|day|week` dan `--from`/`--to` custom range
-
-⏳ **Belum dikerjakan:**
-
-- `cmd/list.go` — lihat data scrobble dengan filter
-- Command stats/agregasi (top artist/track/album)
-- Resolver matching `scrobble_logs.trackId` → `tracks`/`artists`
-- Struct `TrackWithArtist` dsb untuk hasil query JOIN (kalau nanti dibutuhkan `list`)
-
-## Isu Terbuka (Belum Diputuskan)
-
-1. **Custom range `--to` inclusive/exclusive**: saat ini `--to 2026-09-05` di-parse sebagai jam 00:00 tanggal itu (pakai `time.Local`), sehingga scrobble di tanggal 5 September sendiri **tidak ikut ke-fetch**. Perlu diputuskan apakah perlu di-adjust ke akhir hari (`23:59:59`) atau dibiarkan seperti sekarang.
-2. **Kegagalan 1 halaman saat sync**: saat ini kalau ada 1 halaman gagal terus setelah retry habis, seluruh proses `sync` berhenti total (error), bukan skip halaman itu dan lanjut ke halaman berikutnya.
-3. **Timezone custom range**: parsing tanggal pakai `time.Local` (timezone mesin yang menjalankan CLI) — perlu dipastikan ini sesuai ekspektasi.
+| Area                           | Keputusan                                                                                                                                                                 |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Resolver track/artist matching | **Aktif (Batch 500)** — Memanfaatkan partial index `WHERE track_id IS NULL`. `INSERT OR IGNORE` ke `artists` & `tracks`, lalu update balik `track_id` di `scrobble_logs`. |     |
+| Dedup insert                   | `INSERT OR IGNORE` memanfaatkan unique index yang sudah ada di schema                                                                                                     |
+| Retry API                      | Exponential backoff (500ms, 1s, 2s, 4s...), retry hanya untuk network error/429/5xx, max 4x retry                                                                         |
+| Timeout                        | Per-request saja (15 detik di `http.Client`), tidak ada timeout keseluruhan command                                                                                       |
+| Custom range                   | Maksimal 7 hari (`service.MaxCustomRangeDays`), divalidasi & ditolak keras di `cmd` kalau lebih                                                                           |
+| Album kosong dari API          | Disimpan sebagai `NULL` (bukan string kosong)                                                                                                                             |
+| Now-playing track dari API     | Di-skip saat sync (belum final scrobble, belum ada timestamp)                                                                                                             |
+| Relasi antar entity di Go      | Tidak pakai nested struct/pointer ala ORM — cuma foreign key ID; kalau butuh JOIN, buat struct baru khusus untuk hasil query itu                                          |
 
 ## Library yang Dipakai (go.mod)
 
-github.com/spf13/cobra v1.10.2
-github.com/tursodatabase/libsql-client-go (native driver)
-github.com/joho/godotenv v1.5.1
-github.com/google/uuid v1.6.0
+- github.com/spf13/cobra v1.10.2
+- github.com/tursodatabase/libsql-client-go (native driver)
+- github.com/joho/godotenv v1.5.1
+- github.com/google/uuid v1.6.0
