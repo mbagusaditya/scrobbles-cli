@@ -57,11 +57,11 @@ func (s *ScrobbleService) ResolveUnlinkedScrobbles(ctx context.Context, batchSiz
 		// 2. Ambil kombinasi unik (artist, title, album) dari baris yang track_id IS NULL
 		// Memanfaatkan partial index: idx_scrobble_logs_unresolved
 		query := `
-			SELECT DISTINCT raw_artist, raw_title, COALESCE(raw_album, '') AS raw_album
-			FROM scrobble_logs
-			WHERE track_id IS NULL
-			LIMIT ?
-		`
+					SELECT DISTINCT raw_artist, raw_title, COALESCE(raw_album, '') AS raw_album
+					FROM scrobble_logs
+					WHERE track_id IS NULL
+					LIMIT ?
+				`
 		rows, err := s.db.QueryContext(ctx, query, batchSize)
 		if err != nil {
 			return result, fmt.Errorf("gagal query unresolved scrobbles: %w", err)
@@ -75,6 +75,12 @@ func (s *ScrobbleService) ResolveUnlinkedScrobbles(ctx context.Context, batchSiz
 				return result, fmt.Errorf("gagal scan baris unresolved: %w", err)
 			}
 			items = append(items, it)
+		}
+
+		// Periksa error yang mungkin terjadi selama iterasi rows.Next()
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return result, fmt.Errorf("error saat membaca baris unresolved scrobbles: %w", err)
 		}
 		rows.Close()
 
