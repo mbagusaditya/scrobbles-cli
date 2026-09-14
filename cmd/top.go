@@ -2,10 +2,9 @@ package cmd
 
 import (
 	"fmt"
-	"os"
-	"text/tabwriter"
 	"time"
 
+	"github.com/mattn/go-runewidth"
 	"github.com/spf13/cobra"
 
 	"github.com/mbagusaditya/scrobbles-cli/internal/model"
@@ -167,23 +166,30 @@ func runTop(cmd *cobra.Command, targetType string) error {
 		return humanizeError(err)
 	}
 
-	// 4. Tampilkan tabel output yang rapi
+	// 4. Tampilkan output yang rapi
 	fmt.Printf("=== Top %d %s (%s) ===\n\n", filter.Limit, targetType, periodLabel)
 	if len(items) == 0 {
 		fmt.Println("Tidak ada data scrobble pada periode ini.")
 		return nil
 	}
 
-	// Inisialisasi tabwriter: output ke os.Stdout, minwidth 0, tabwidth 0, padding 3 spasi
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-
-	for i, item := range items {
-		paddedName := padRight(item.Name, 32)
-		fmt.Printf(" %2d. %s  %4s scrobbles\n", i+1, paddedName, formatNumber(item.Count))
+	// Hitung lebar visual kolom nama secara dinamis
+	colWidth := 25
+	for _, item := range items {
+		w := runewidth.StringWidth(item.Name)
+		if w > colWidth {
+			colWidth = w
+		}
+	}
+	if colWidth > 45 {
+		colWidth = 45
 	}
 
-	// Wajib Flush() untuk mendorong buffer ke layar terminal
-	_ = w.Flush()
+	for i, item := range items {
+		paddedName := padRight(item.Name, colWidth)
+		formattedCount := formatNumber(item.Count)
+		fmt.Printf(" %2d.  %s  %6s scrobbles\n", i+1, paddedName, formattedCount)
+	}
 
 	return nil
 }
