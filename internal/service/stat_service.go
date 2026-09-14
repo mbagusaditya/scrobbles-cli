@@ -18,11 +18,33 @@ type StatsResult struct {
 	TotalTracks    int
 }
 
-// GetStats menghitung agregasi total scrobbles, artis unik, album unik,
-// dan track unik dalam 1 kali roundtrip query ke database Turso.
-// Jika filter.From atau filter.To bernilai zero-value (IsZero),
-// batas tersebut tidak akan disertakan dalam klausa WHERE (all-time).
 func (s *ScrobbleService) GetStats(ctx context.Context, filter StatsFilter) (*StatsResult, error) {
+	// Skenario 1: All-Time Stats (Memanfaatkan master tabel artists & tracks secara langsung)
+	if filter.From.IsZero() && filter.To.IsZero() {
+		query := `
+			SELECT
+				(SELECT COUNT(*) FROM scrobble_logs) AS total_scrobbles,
+				(SELECT COUNT(*) FROM artists) AS total_artists,
+				(SELECT COUNT(DISTINCT raw_album) FROM scrobble_logs WHERE raw_album IS NOT NULL AND raw_album != '') AS total_albums,
+				(SELECT COUNT(*) FROM tracks) AS total_tracks;
+		`
+
+		var res StatsResult
+		row := s.db.QueryRowContext(ctx, query)
+		err := row.Scan(
+			&res.TotalScrobbles,
+			&res.TotalArtists,
+			&res.TotalAlbums,
+			&res.TotalTracks,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("gagal query all-time statistik: %w", err)
+		}
+		return &res, nil
+	}
+
+	// Skenario 2: Filter Rentang Tanggal Tertentu
+	// Menghitung aktivitas spesifik pada rentang tanggal tersebut dari scrobble_logs
 	query := `
 		SELECT
 			COUNT(*) AS total_scrobbles,
@@ -30,7 +52,7 @@ func (s *ScrobbleService) GetStats(ctx context.Context, filter StatsFilter) (*St
 			COUNT(DISTINCT CASE
 				WHEN raw_album IS NOT NULL AND raw_album != '' THEN raw_album
 			END) AS total_albums,
-			COUNT(DISTINCT raw_artist || ' - ' || raw_title) AS total_tracks
+			COUNT(DISTINCT COALESCE(track_id, raw_artist || ' - ' || raw_title)) AS total_tracks
 		FROM scrobble_logs
 		WHERE 1=1
 	`
@@ -56,7 +78,7 @@ func (s *ScrobbleService) GetStats(ctx context.Context, filter StatsFilter) (*St
 		&res.TotalTracks,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("gagal query statistik scrobble: %w", err)
+		return nil, fmt.Errorf("gagal query statistik rentang tanggal: %w", err)
 	}
 
 	return &res, nil
