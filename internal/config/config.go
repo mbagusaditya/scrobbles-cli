@@ -3,12 +3,13 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/joho/godotenv"
 )
 
-// Config menampung seluruh konfigurasi aplikasi yang diambil dari .env.
+// Config menampung seluruh konfigurasi aplikasi.
 type Config struct {
 	DatabaseURL        string
 	DatabaseAuthToken  string
@@ -17,14 +18,12 @@ type Config struct {
 	LastfmUsername     string
 }
 
-// Load membaca file .env (kalau ada) lalu memuat environment variable
-// ke dalam struct Config. Mengembalikan error kalau ada variabel wajib
-// yang kosong.
+// Load membaca konfigurasi dengan urutan prioritas:
+// 1. File .env di direktori kerja aktif (lokal project / dev mode).
+// 2. File XDG standard: $XDG_CONFIG_HOME/scrobbles/config.env (default ~/.config/scrobbles/config.env).
+// 3. Environment variables sistem asli (export/container injection).
 func Load() (*Config, error) {
-	// Abaikan error kalau file .env tidak ditemukan -> kita tetap coba
-	// baca dari environment asli (berguna untuk deployment yang inject
-	// env var langsung, bukan lewat file).
-	_ = godotenv.Load()
+	loadEnvironment()
 
 	cfg := &Config{
 		DatabaseURL:        os.Getenv("DATABASE_URL"),
@@ -39,6 +38,23 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// loadEnvironment mencoba memuat file konfigurasi tanpa menghentikan proses jika tidak ditemukan.
+func loadEnvironment() {
+	// 1. Prioritas utama: .env di current working directory
+	if err := godotenv.Load(); err == nil {
+		return
+	}
+
+	// 2. Prioritas kedua: Standar XDG Base Directory
+	configDir, err := os.UserConfigDir()
+	if err == nil {
+		xdgConfigFile := filepath.Join(configDir, "scrobbles", "config.env")
+		_ = godotenv.Load(xdgConfigFile)
+	}
+
+	// 3. Fallback: variabel env sistem bawaan akan otomatis dibaca via os.Getenv()
 }
 
 // validate memastikan semua variabel wajib terisi. LastfmSharedSecret
@@ -61,7 +77,7 @@ func (c *Config) validate() error {
 	}
 
 	if len(missing) > 0 {
-		return fmt.Errorf("variabel .env berikut wajib diisi: %s", strings.Join(missing, ", "))
+		return fmt.Errorf("variabel konfigurasi berikut wajib diisi (cek .env atau ~/.config/scrobbles/config.env): %s", strings.Join(missing, ", "))
 	}
 
 	return nil
