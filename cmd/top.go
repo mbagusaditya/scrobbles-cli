@@ -23,9 +23,9 @@ var (
 
 // topCmd bertindak sebagai parent command
 var topCmd = &cobra.Command{
-	Use:   "top [artist|album]",
-	Short: "Menampilkan ranking artist atau album yang paling sering diputar",
-	Long: `Menampilkan daftar peringkat artis atau album teratas berdasarkan jumlah scrobble.
+	Use:   "top [artist|album|track]",
+	Short: "Menampilkan ranking artist, album, atau track yang paling sering diputar",
+	Long: `Menampilkan daftar peringkat artis, album, atau trek teratas berdasarkan jumlah scrobble.
 Mendukung filter waktu preset (--day, --week, --month, --year) maupun custom range (--from dan --to).`,
 }
 
@@ -47,12 +47,22 @@ var topAlbumCmd = &cobra.Command{
 	},
 }
 
+// topTrackCmd untuk peringkat lagu/track
+var topTrackCmd = &cobra.Command{
+	Use:   "track",
+	Short: "Menampilkan daftar track lagu teratas",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runTop(cmd, "Track")
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(topCmd)
 	topCmd.AddCommand(topArtistCmd)
 	topCmd.AddCommand(topAlbumCmd)
+	topCmd.AddCommand(topTrackCmd)
 
-	// PersistentFlags agar tersedia di kedua child command (artist & album)
+	// PersistentFlags agar tersedia di semua child command (artist, album, track)
 	topCmd.PersistentFlags().StringVar(&topFrom, "from", "", "Batas awal tanggal (format: YYYY-MM-DD)")
 	topCmd.PersistentFlags().StringVar(&topTo, "to", "", "Batas akhir tanggal (format: YYYY-MM-DD)")
 	topCmd.PersistentFlags().BoolVar(&topDay, "day", false, "Peringkat hari ini")
@@ -156,10 +166,13 @@ func runTop(cmd *cobra.Command, targetType string) error {
 	var items []model.TopItem
 	var err error
 
-	if targetType == "Artist" {
+	switch targetType {
+	case "Artist":
 		items, err = app.scrobbleService.GetTopArtists(ctx, filter)
-	} else {
+	case "Album":
 		items, err = app.scrobbleService.GetTopAlbums(ctx, filter)
+	case "Track":
+		items, err = app.scrobbleService.GetTopTracks(ctx, filter)
 	}
 
 	if err != nil {
@@ -188,7 +201,12 @@ func runTop(cmd *cobra.Command, targetType string) error {
 	for i, item := range items {
 		paddedName := padRight(item.Name, colWidth)
 		formattedCount := formatNumber(item.Count)
-		fmt.Printf(" %2d.  %s  %6s scrobbles\n", i+1, paddedName, formattedCount)
+
+		if item.Detail != "" {
+			fmt.Printf(" %2d.  %s  by %-20s  %6s scrobbles\n", i+1, paddedName, item.Detail, formattedCount)
+		} else {
+			fmt.Printf(" %2d.  %s  %6s scrobbles\n", i+1, paddedName, formattedCount)
+		}
 	}
 
 	return nil
