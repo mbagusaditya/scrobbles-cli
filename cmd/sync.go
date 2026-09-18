@@ -11,16 +11,19 @@ import (
 )
 
 var (
-	syncFrom string
-	syncTo   string
+	syncFrom  string
+	syncTo    string
+	syncDay   bool
+	syncWeek  bool
+	syncMonth bool
 )
 
 var syncCmd = &cobra.Command{
 	Use:   "sync",
 	Short: "Sinkronisasi riwayat scrobble dari Last.fm ke Turso",
 	Long: `Mengambil scrobble musik dari Last.fm dan menyimpannya ke database Turso.
-Mendukung filter rentang tanggal --from dan --to. Jika kedua flag kosong,
-secara default akan mengambil data untuk hari ini penuh.`,
+Mendukung filter rentang tanggal --from dan --to, serta preset --day, --week, dan --month.
+Jika tanpa flag, secara default akan mengambil data untuk hari ini penuh.`,
 	RunE: runSync,
 }
 
@@ -74,20 +77,61 @@ func init() {
 
 	syncCmd.Flags().StringVar(&syncFrom, "from", "", "Batas awal pengambilan data (format: YYYY-MM-DD)")
 	syncCmd.Flags().StringVar(&syncTo, "to", "", "Batas akhir pengambilan data (format: YYYY-MM-DD)")
+	syncCmd.Flags().BoolVar(&syncDay, "day", false, "Sync data hari ini penuh")
+	syncCmd.Flags().BoolVar(&syncWeek, "week", false, "Sync data 7 hari terakhir")
+	syncCmd.Flags().BoolVar(&syncMonth, "month", false, "Sync data bulan berjalan (sejak tgl 1)")
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	now := time.Now()
 
-	var fromTime, toTime time.Time
+	// 1. Validasi mutual exclusion untuk preset flags
+	presetCount := 0
+	if syncDay {
+		presetCount++
+	}
+	if syncWeek {
+		presetCount++
+	}
+	if syncMonth {
+		presetCount++
+	}
 
-	// 1. Logika penentuan rentang waktu
-	if syncFrom == "" && syncTo == "" {
-		// Kasus: Kedua flag kosong -> satu hari ini penuh
-		fromTime = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
-		toTime = time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 0, time.Local)
-	} else {
+	if presetCount > 1 {
+		return fmt.Errorf("pilih salah satu preset saja: --day, --week, atau --month")
+	}
+
+	if presetCount == 1 && (syncFrom != "" || syncTo != "") {
+		return fmt.Errorf("flag preset (--day/--week/--month) tidak dapat digabung dengan --from atau --to")
+	}
+
+	// 2. Logika penentuan rentang waktu
+	var fromTime, toTime time.Time
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+	todayEnd := time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 0, time.Local)
+
+	switch {
+	case syncDay:
+		fromTime = todayStart
+		toTime = todayEnd
+
+	case syncWeek:
+		// Rolling 7 hari ke belakang sampai akhir hari ini
+		fromTime = todayStart.AddDate(0, 0, -6)
+		toTime = todayEnd
+
+	case syncMonth:
+		// Sejak tanggal 1 bulan berjalan
+		fromTime = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.Local)
+		toTime = todayEnd
+
+	case syncFrom == "" && syncTo == "":
+		// Default: jika semua flag kosong, sync hari ini penuh
+		fromTime = todayStart
+		toTime = todayEnd
+
+	default:
 		// Parsing --from jika disediakan
 		if syncFrom != "" {
 			t, err := time.ParseInLocation("2006-01-02", syncFrom, time.Local)
@@ -108,18 +152,18 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 		// Jika hanya --from yang diisi, --to otomatis ke akhir hari ini
 		if syncFrom != "" && syncTo == "" {
-			toTime = time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 0, time.Local)
+			toTime = todayEnd
 		}
-		// Jika hanya --to yang diisi, fromTime dibiarkan time.Time{} (zero value)
-		// agar service mengambil dari scrobble terakhir yang ada di Turso.
+		// Jika hanya --to yang diisi, fromTime tetap zero value
+		// agar service mengambil dari scrobble terakhir di DB.
 	}
 
-	// 2. Validasi rentang tanggal jika keduanya terisi
+	// 3. Validasi rentang tanggal jika keduanya terisi
 	if !fromTime.IsZero() && !toTime.IsZero() && fromTime.After(toTime) {
 		return fmt.Errorf("rentang tanggal tidak valid: --from tidak boleh lebih baru dari --to")
 	}
 
-	// 3. Tampilkan informasi rentang waktu sinkronisasi ke user
+	// 4. Tampilkan informasi rentang waktu sinkronisasi ke user
 	fmt.Println("Memulai sinkronisasi scrobble...")
 	if fromTime.IsZero() {
 		fmt.Printf("Rentang: [Scrobble terakhir di DB] s.d. %s\n\n", toTime.Format("2006-01-02 15:04:05"))
