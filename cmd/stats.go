@@ -21,7 +21,8 @@ var (
 var statsCmd = &cobra.Command{
 	Use:   "stats",
 	Short: "Menampilkan statistik agregasi scrobble",
-	Long: `Menampilkan ringkasan total scrobbles, artis unik, album unik, dan track unik.
+	Long: `Menampilkan ringkasan total scrobbles, library unik, estimasi waktu putar,
+serta kebiasaan mendengarkan (rata-rata harian, hari tersibuk, jam puncak, dan repeat ratio).
 Mendukung rentang custom via --from dan --to, atau preset via --day, --week, --month, dan --year.
 Jika tidak ada flag yang diberikan, statistik akan dihitung untuk sepanjang waktu (all-time).`,
 	RunE: runStats,
@@ -135,13 +136,54 @@ func runStats(cmd *cobra.Command, args []string) error {
 		return humanizeError(err)
 	}
 
-	// 4. Render output ke terminal
+	if stats.TotalScrobbles == 0 {
+		fmt.Println("=== Scrobbles Statistics ===")
+		fmt.Printf("Periode: %s\n\n", periodLabel)
+		fmt.Println("Tidak ada data scrobble pada periode ini.")
+		return nil
+	}
+
+	// 4. Kalkulasi metrik turunan
+	// Asumsi durasi standar 1 scrobble ~ 3.5 menit (210 detik)
+	totalMinutes := float64(stats.TotalScrobbles) * 3.5
+	totalHours := totalMinutes / 60.0
+	totalDaysListening := totalHours / 24.0
+
+	var activeRatio float64
+	if stats.TotalDays > 0 {
+		activeRatio = (float64(stats.ActiveDays) / float64(stats.TotalDays)) * 100.0
+	}
+
+	// 5. Render output ke terminal
 	fmt.Println("=== Scrobbles Statistics ===")
-	fmt.Printf("Periode         : %s\n\n", periodLabel)
-	fmt.Printf("Total Scrobbles : %s\n", formatNumber(stats.TotalScrobbles))
-	fmt.Printf("Unique Tracks   : %s\n", formatNumber(stats.TotalTracks))
-	fmt.Printf("Unique Artists  : %s\n", formatNumber(stats.TotalArtists))
-	fmt.Printf("Unique Albums   : %s\n", formatNumber(stats.TotalAlbums))
+	if periodLabel == "All Time" && !stats.FirstScrobble.IsZero() {
+		fmt.Printf("Periode           : All Time (%s s.d. %s)\n\n",
+			stats.FirstScrobble.Format("2006-01-02"),
+			stats.LastScrobble.Format("2006-01-02"))
+	} else {
+		fmt.Printf("Periode           : %s\n\n", periodLabel)
+	}
+
+	fmt.Println("--- Overview ---")
+	fmt.Printf("Total Scrobbles   : %s\n", formatNumber(stats.TotalScrobbles))
+	fmt.Printf("Estimated Time    : ~%.1f Jam (~%.1f Hari)\n", totalHours, totalDaysListening)
+	fmt.Printf("Unique Tracks     : %s\n", formatNumber(stats.TotalTracks))
+	fmt.Printf("Unique Artists    : %s\n", formatNumber(stats.TotalArtists))
+	fmt.Printf("Unique Albums     : %s\n\n", formatNumber(stats.TotalAlbums))
+
+	fmt.Println("--- Listening Habit ---")
+	fmt.Printf("Avg / Active Day  : %.1f scrobbles/hari\n", stats.AvgPerDay)
+	if stats.TotalDays > 1 {
+		fmt.Printf("Active Days       : %d / %d hari (%.1f%%)\n", stats.ActiveDays, stats.TotalDays, activeRatio)
+	} else {
+		fmt.Printf("Active Days       : %d hari\n", stats.ActiveDays)
+	}
+
+	if stats.PeakDayDate != "" {
+		fmt.Printf("Peak Day          : %s (%s scrobbles)\n", stats.PeakDayDate, formatNumber(stats.PeakDayHits))
+	}
+	fmt.Printf("Peak Hour         : %02d:00 - %02d:00\n", stats.PeakHour, (stats.PeakHour+1)%24)
+	fmt.Printf("Repeat Ratio      : %.1fx per track\n", stats.RepeatRatio)
 
 	return nil
 }

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -12,74 +13,157 @@ type StatsFilter struct {
 }
 
 type StatsResult struct {
+	// Ringkasan Utama
 	TotalScrobbles int
 	TotalArtists   int
 	TotalAlbums    int
 	TotalTracks    int
+
+	// Rentang & Metrik Tambahan
+	FirstScrobble time.Time
+	LastScrobble  time.Time
+	ActiveDays    int
+	TotalDays     int
+	AvgPerDay     float64
+	PeakDayDate   string
+	PeakDayHits   int
+	PeakHour      int
+	RepeatRatio   float64
 }
 
 func (s *ScrobbleService) GetStats(ctx context.Context, filter StatsFilter) (*StatsResult, error) {
-	// Skenario 1: All-Time Stats (Memanfaatkan master tabel artists & tracks secara langsung)
-	if filter.From.IsZero() && filter.To.IsZero() {
-		query := `
-			SELECT
-				(SELECT COUNT(*) FROM scrobble_logs) AS total_scrobbles,
-				(SELECT COUNT(*) FROM artists) AS total_artists,
-				(SELECT COUNT(DISTINCT raw_album) FROM scrobble_logs WHERE raw_album IS NOT NULL AND raw_album != '') AS total_albums,
-				(SELECT COUNT(*) FROM tracks) AS total_tracks;
-		`
-
-		var res StatsResult
-		row := s.db.QueryRowContext(ctx, query)
-		err := row.Scan(
-			&res.TotalScrobbles,
-			&res.TotalArtists,
-			&res.TotalAlbums,
-			&res.TotalTracks,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("gagal query all-time statistik: %w", err)
-		}
-		return &res, nil
-	}
-
-	// Skenario 2: Filter Rentang Tanggal Tertentu
-	// Menghitung aktivitas spesifik pada rentang tanggal tersebut dari scrobble_logs
-	query := `
-		SELECT
-			COUNT(*) AS total_scrobbles,
-			COUNT(DISTINCT raw_artist) AS total_artists,
-			COUNT(DISTINCT CASE
-				WHEN raw_album IS NOT NULL AND raw_album != '' THEN raw_album
-			END) AS total_albums,
-			COUNT(DISTINCT COALESCE(track_id, raw_artist || ' - ' || raw_title)) AS total_tracks
-		FROM scrobble_logs
-		WHERE 1=1
-	`
-
+	var conditions []string
 	var args []any
 
 	if !filter.From.IsZero() {
-		query += " AND played_at >= ?"
+		conditions = append(conditions, "played_at >= ?")
 		args = append(args, filter.From.Unix())
 	}
-
 	if !filter.To.IsZero() {
-		query += " AND played_at <= ?"
+		conditions = append(conditions, "played_at <= ?")
 		args = append(args, filter.To.Unix())
 	}
 
-	var res StatsResult
-	row := s.db.QueryRowContext(ctx, query, args...)
-	err := row.Scan(
-		&res.TotalScrobbles,
-		&res.TotalArtists,
-		&res.TotalAlbums,
-		&res.TotalTracks,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("gagal query statistik rentang tanggal: %w", err)
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = "WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	return &res, nil
+	// 1 kali scan linier murni: Turso hanya membaca baris data persis sebanyak jumlah log
+	query := fmt.Sprintf(`
+		SELECT
+			raw_artist,
+			COALESCE(raw_album, ''),
+			raw_title,
+			COALESCE(track_id, ''),
+			played_at
+		FROM scrobble_logs
+		%s
+		ORDER BY played_at ASC
+	`, whereClause)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("gagal query scrobble logs untuk statistik: %w", err)
+	}
+	defer rows.Close()
+
+	// In-memory set & counter di Go (zero cost reads ke Turso)
+	artistSet := make(map[string]struct{})
+	albumSet := make(map[string]struct{})
+	trackSet := make(map[string]struct{})
+	dayCounts := make(map[string]int) // "YYYY-MM-DD" -> count
+	hourCounts := make(map[int]int)   // 0-23 -> count
+
+	var totalScrobbles int
+	var firstPlayed, lastPlayed time.Time
+
+	for rows.Next() {
+		var artist, album, title, trackID string
+		var epoch int64
+
+		if err := rows.Scan(&artist, &album, &title, &trackID, &epoch); err != nil {
+			return nil, fmt.Errorf("gagal membaca baris statistik: %w", err)
+		}
+
+		t := time.Unix(epoch, 0).Local()
+		if totalScrobbles == 0 {
+			firstPlayed = t
+		}
+		lastPlayed = t
+		totalScrobbles++
+
+		// Unique Artists
+		artistSet[artist] = struct{}{}
+
+		// Unique Albums
+		if album != "" {
+			albumSet[album] = struct{}{}
+		}
+
+		// Unique Tracks (gunakan track_id jika ada, fallback ke string komposit)
+		if trackID != "" {
+			trackSet[trackID] = struct{}{}
+		} else {
+			trackSet[artist+"\x00"+title] = struct{}{}
+		}
+
+		// Distribusi waktu
+		dayCounts[t.Format("2006-01-02")]++
+		hourCounts[t.Hour()]++
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterasi baris statistik: %w", err)
+	}
+
+	if totalScrobbles == 0 {
+		return &StatsResult{}, nil
+	}
+
+	// Hitung metrik turunan di Go
+	activeDays := len(dayCounts)
+	totalDays := int(lastPlayed.Sub(firstPlayed).Hours()/24) + 1
+	if totalDays <= 0 {
+		totalDays = 1
+	}
+
+	var peakDay string
+	var peakDayHits int
+	for day, count := range dayCounts {
+		if count > peakDayHits {
+			peakDayHits = count
+			peakDay = day
+		}
+	}
+
+	var peakHour int
+	var peakHourHits int
+	for hour, count := range hourCounts {
+		if count > peakHourHits {
+			peakHourHits = count
+			peakHour = hour
+		}
+	}
+
+	repeatRatio := 0.0
+	if len(trackSet) > 0 {
+		repeatRatio = float64(totalScrobbles) / float64(len(trackSet))
+	}
+
+	return &StatsResult{
+		TotalScrobbles: totalScrobbles,
+		TotalArtists:   len(artistSet),
+		TotalAlbums:    len(albumSet),
+		TotalTracks:    len(trackSet),
+		FirstScrobble:  firstPlayed,
+		LastScrobble:   lastPlayed,
+		ActiveDays:     activeDays,
+		TotalDays:      totalDays,
+		AvgPerDay:      float64(totalScrobbles) / float64(activeDays),
+		PeakDayDate:    peakDay,
+		PeakDayHits:    peakDayHits,
+		PeakHour:       peakHour,
+		RepeatRatio:    repeatRatio,
+	}, nil
 }
