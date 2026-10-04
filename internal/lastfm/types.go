@@ -116,3 +116,61 @@ type errorResponse struct {
 	Error   int    `json:"error"`
 	Message string `json:"message"`
 }
+
+type TrackInfoResponse struct {
+	Track struct {
+		Name      string `json:"name"`
+		Duration  string `json:"duration"` // ms dalam string
+		Listeners string `json:"listeners"`
+		Playcount string `json:"playcount"`
+		Artist    struct {
+			Name string `json:"name"`
+		} `json:"artist"`
+		Album struct {
+			Title string `json:"title"`
+		} `json:"album"`
+		TopTags struct {
+			Tag []struct {
+				Name string `json:"name"`
+			} `json:"tag"`
+		} `json:"toptags"`
+		Wiki struct {
+			Summary string `json:"summary"`
+		} `json:"wiki"`
+	} `json:"track"`
+}
+
+type ArtistInfoResponse struct {
+	Artist struct {
+		Name  string `json:"name"`
+		Stats struct {
+			Listeners string `json:"listeners"`
+			Playcount string `json:"playcount"`
+		} `json:"stats"`
+		Tags struct {
+			Tag []struct {
+				Name string `json:"name"`
+			} `json:"tag"`
+		} `json:"tags"`
+		Bio struct {
+			Summary string `json:"summary"`
+		} `json:"bio"`
+	} `json:"artist"`
+}
+
+type AlbumInfoResponse struct {
+	Album struct {
+		Name      string `json:"name"`
+		Artist    string `json:"artist"`
+		Listeners string `json:"listeners"`
+		Playcount string `json:"playcount"`
+		Tags      struct {
+			Tag []struct {
+				Name string `json:"name"`
+			} `json:"tag"`
+		} `json:"tags"`
+		Wiki struct {
+			Summary string `json:"summary"`
+		} `json:"wiki"`
+	} `json:"album"`
+}
