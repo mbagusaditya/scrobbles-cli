@@ -42,8 +42,12 @@ func calculateTotalPages(totalItems, limit int) int {
 func (s *ScrobbleService) ListLibraryArtists(ctx context.Context, filter model.LibraryFilter) (*model.LibraryResult, error) {
 	page, limit, offset := normalizePagination(filter)
 
-	// 1. Hitung total artis unik
-	countQuery := `SELECT COUNT(DISTINCT raw_artist) FROM scrobble_logs`
+	// 1. Hitung total artis unik (selaras dengan normalizeKey di stat_service.go)
+	countQuery := `
+		SELECT COUNT(DISTINCT LOWER(TRIM(raw_artist)))
+		FROM scrobble_logs
+		WHERE TRIM(raw_artist) != ''
+	`
 	var totalItems int
 	if err := s.db.QueryRowContext(ctx, countQuery).Scan(&totalItems); err != nil {
 		return nil, fmt.Errorf("gagal menghitung total artists di pustaka: %w", err)
@@ -61,10 +65,11 @@ func (s *ScrobbleService) ListLibraryArtists(ctx context.Context, filter model.L
 
 	// 2. Ambil data dengan sorting A-Z case-insensitive
 	query := `
-		SELECT raw_artist, COUNT(*) as play_count
+		SELECT MIN(TRIM(raw_artist)), COUNT(*) as play_count
 		FROM scrobble_logs
-		GROUP BY raw_artist
-		ORDER BY raw_artist COLLATE NOCASE ASC
+		WHERE TRIM(raw_artist) != ''
+		GROUP BY LOWER(TRIM(raw_artist))
+		ORDER BY MIN(TRIM(raw_artist)) COLLATE NOCASE ASC
 		LIMIT ? OFFSET ?
 	`
 
@@ -103,10 +108,10 @@ func (s *ScrobbleService) ListLibraryAlbums(ctx context.Context, filter model.Li
 	// 1. Hitung total kombinasi album dan artis unik yang valid
 	countQuery := `
 		SELECT COUNT(*) FROM (
-			SELECT raw_album, raw_artist
+			SELECT LOWER(TRIM(raw_album)), LOWER(TRIM(raw_artist))
 			FROM scrobble_logs
-			WHERE raw_album IS NOT NULL AND raw_album != ''
-			GROUP BY raw_album, raw_artist
+			WHERE raw_album IS NOT NULL AND TRIM(raw_album) != ''
+			GROUP BY LOWER(TRIM(raw_album)), LOWER(TRIM(raw_artist))
 		)
 	`
 	var totalItems int
@@ -126,11 +131,11 @@ func (s *ScrobbleService) ListLibraryAlbums(ctx context.Context, filter model.Li
 
 	// 2. Ambil data album diurutkan A-Z berdasarkan judul album
 	query := `
-		SELECT raw_album, raw_artist, COUNT(*) as play_count
+		SELECT MIN(TRIM(raw_album)), MIN(TRIM(raw_artist)), COUNT(*) as play_count
 		FROM scrobble_logs
-		WHERE raw_album IS NOT NULL AND raw_album != ''
-		GROUP BY raw_album, raw_artist
-		ORDER BY raw_album COLLATE NOCASE ASC, raw_artist COLLATE NOCASE ASC
+		WHERE raw_album IS NOT NULL AND TRIM(raw_album) != ''
+		GROUP BY LOWER(TRIM(raw_album)), LOWER(TRIM(raw_artist))
+		ORDER BY MIN(TRIM(raw_album)) COLLATE NOCASE ASC, MIN(TRIM(raw_artist)) COLLATE NOCASE ASC
 		LIMIT ? OFFSET ?
 	`
 
@@ -176,9 +181,10 @@ func (s *ScrobbleService) ListLibraryTracks(ctx context.Context, filter model.Li
 	// 1. Hitung total pasangan (raw_title, raw_artist) unik
 	countQuery := `
 		SELECT COUNT(*) FROM (
-			SELECT raw_title, raw_artist
+			SELECT LOWER(TRIM(raw_title)), LOWER(TRIM(raw_artist))
 			FROM scrobble_logs
-			GROUP BY raw_title, raw_artist
+			WHERE TRIM(raw_title) != ''
+			GROUP BY LOWER(TRIM(raw_title)), LOWER(TRIM(raw_artist))
 		)
 	`
 	var totalItems int
@@ -198,10 +204,11 @@ func (s *ScrobbleService) ListLibraryTracks(ctx context.Context, filter model.Li
 
 	// 2. Ambil data trek unik diurutkan A-Z berdasarkan judul trek
 	query := `
-		SELECT raw_title, raw_artist, COUNT(*) as play_count
+		SELECT MIN(TRIM(raw_title)), MIN(TRIM(raw_artist)), COUNT(*) as play_count
 		FROM scrobble_logs
-		GROUP BY raw_title, raw_artist
-		ORDER BY raw_title COLLATE NOCASE ASC, raw_artist COLLATE NOCASE ASC
+		WHERE TRIM(raw_title) != ''
+		GROUP BY LOWER(TRIM(raw_title)), LOWER(TRIM(raw_artist))
+		ORDER BY MIN(TRIM(raw_title)) COLLATE NOCASE ASC, MIN(TRIM(raw_artist)) COLLATE NOCASE ASC
 		LIMIT ? OFFSET ?
 	`
 

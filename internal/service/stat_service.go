@@ -31,6 +31,23 @@ type StatsResult struct {
 	RepeatRatio   float64
 }
 
+// normalizeKey menormalisasi string (trim spasi & lowercase) agar konsisten
+// antara kalkulasi in-memory Go dan grouping SQLite.
+func normalizeKey(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
+// calcInclusiveCalendarDays menghitung jumlah hari kalender secara inklusif
+// berdasarkan titik tengah hari (12:00:00) agar kebal terhadap selisih jam/menit.
+func calcInclusiveCalendarDays(start, end time.Time) int {
+	s := time.Date(start.Year(), start.Month(), start.Day(), 12, 0, 0, 0, start.Location())
+	e := time.Date(end.Year(), end.Month(), end.Day(), 12, 0, 0, 0, end.Location())
+	if e.Before(s) {
+		return 1
+	}
+	return int(e.Sub(s).Hours()/24) + 1
+}
+
 func (s *ScrobbleService) GetStats(ctx context.Context, filter StatsFilter) (*StatsResult, error) {
 	var conditions []string
 	var args []any
@@ -55,7 +72,6 @@ func (s *ScrobbleService) GetStats(ctx context.Context, filter StatsFilter) (*St
 			raw_artist,
 			COALESCE(raw_album, ''),
 			raw_title,
-			COALESCE(track_id, ''),
 			played_at
 		FROM scrobble_logs
 		%s
@@ -79,10 +95,10 @@ func (s *ScrobbleService) GetStats(ctx context.Context, filter StatsFilter) (*St
 	var firstPlayed, lastPlayed time.Time
 
 	for rows.Next() {
-		var artist, album, title, trackID string
+		var artist, album, title string
 		var epoch int64
 
-		if err := rows.Scan(&artist, &album, &title, &trackID, &epoch); err != nil {
+		if err := rows.Scan(&artist, &album, &title, &epoch); err != nil {
 			return nil, fmt.Errorf("gagal membaca baris statistik: %w", err)
 		}
 
@@ -93,19 +109,23 @@ func (s *ScrobbleService) GetStats(ctx context.Context, filter StatsFilter) (*St
 		lastPlayed = t
 		totalScrobbles++
 
-		// Unique Artists
-		artistSet[artist] = struct{}{}
+		normArtist := normalizeKey(artist)
+		normAlbum := normalizeKey(album)
+		normTitle := normalizeKey(title)
 
-		// Unique Albums
-		if album != "" {
-			albumSet[album] = struct{}{}
+		// Unique Artists (selaras dengan ListLibraryArtists)
+		if normArtist != "" {
+			artistSet[normArtist] = struct{}{}
 		}
 
-		// Unique Tracks (gunakan track_id jika ada, fallback ke string komposit)
-		if trackID != "" {
-			trackSet[trackID] = struct{}{}
-		} else {
-			trackSet[artist+"\x00"+title] = struct{}{}
+		// Unique Albums (selaras dengan ListLibraryAlbums: kombinasi album + artist)
+		if normAlbum != "" {
+			albumSet[normArtist+"\x00"+normAlbum] = struct{}{}
+		}
+
+		// Unique Tracks (selaras dengan ListLibraryTracks: kombinasi title + artist)
+		if normTitle != "" {
+			trackSet[normArtist+"\x00"+normTitle] = struct{}{}
 		}
 
 		// Distribusi waktu
@@ -121,11 +141,21 @@ func (s *ScrobbleService) GetStats(ctx context.Context, filter StatsFilter) (*St
 		return &StatsResult{}, nil
 	}
 
-	// Hitung metrik turunan di Go
+	// Hitung TotalDays berdasarkan batas kalender inklusif
 	activeDays := len(dayCounts)
-	totalDays := int(lastPlayed.Sub(firstPlayed).Hours()/24) + 1
-	if totalDays <= 0 {
-		totalDays = 1
+	rangeStart := firstPlayed
+	rangeEnd := lastPlayed
+
+	if !filter.From.IsZero() {
+		rangeStart = filter.From
+	}
+	if !filter.To.IsZero() {
+		rangeEnd = filter.To
+	}
+
+	totalDays := calcInclusiveCalendarDays(rangeStart, rangeEnd)
+	if activeDays > totalDays {
+		totalDays = activeDays
 	}
 
 	var peakDay string
