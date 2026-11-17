@@ -21,7 +21,7 @@ var (
 var statsCmd = &cobra.Command{
 	Use:   "stats",
 	Short: "Menampilkan statistik agregasi scrobble",
-	Long: `Menampilkan ringkasan total scrobbles, library unik, estimasi waktu putar,
+	Long: `Menampilkan ringkasan total scrobbles, library unik, waktu putar (aktual/estimasi),
 serta kebiasaan mendengarkan (rata-rata harian, hari tersibuk, jam puncak, dan repeat ratio).
 Mendukung rentang custom via --from dan --to, atau preset via --day, --week, --month, dan --year.
 Jika tidak ada flag yang diberikan, statistik akan dihitung untuk sepanjang waktu (all-time).`,
@@ -143,10 +143,8 @@ func runStats(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// 4. Kalkulasi metrik turunan
-	// Asumsi durasi standar 1 scrobble ~ 3.5 menit (210 detik)
-	totalMinutes := float64(stats.TotalScrobbles) * 3.5
-	totalHours := totalMinutes / 60.0
+	// 4. Kalkulasi metrik turunan dari akumulasi TotalDurationMs
+	totalHours := float64(stats.TotalDurationMs) / (1000.0 * 60.0 * 60.0)
 	totalDaysListening := totalHours / 24.0
 
 	var activeRatio float64
@@ -166,7 +164,15 @@ func runStats(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("--- Overview ---")
 	fmt.Printf("Total Scrobbles   : %s\n", formatNumber(stats.TotalScrobbles))
-	fmt.Printf("Estimated Time    : ~%.1f Jam (~%.1f Hari)\n", totalHours, totalDaysListening)
+	if stats.ActualDurationCount == stats.TotalScrobbles {
+		fmt.Printf("Listening Time    : %.1f Jam (%.1f Hari)\n", totalHours, totalDaysListening)
+	} else if stats.ActualDurationCount > 0 {
+		fmt.Printf("Listening Time    : ~%.1f Jam (~%.1f Hari) [%.1f%% durasi aktual]\n",
+			totalHours, totalDaysListening, stats.ActualDurationRatio)
+	} else {
+		fmt.Printf("Estimated Time    : ~%.1f Jam (~%.1f Hari) [est. 3,5m/lagu]\n",
+			totalHours, totalDaysListening)
+	}
 	fmt.Printf("Unique Tracks     : %s\n", formatNumber(stats.TotalTracks))
 	fmt.Printf("Unique Artists    : %s\n", formatNumber(stats.TotalArtists))
 	fmt.Printf("Unique Albums     : %s\n\n", formatNumber(stats.TotalAlbums))

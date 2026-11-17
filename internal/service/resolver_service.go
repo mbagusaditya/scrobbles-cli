@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +31,28 @@ type unresolvedItem struct {
 	RawArtist string
 	RawTitle  string
 	RawAlbum  string
+}
+
+type DurationProgress struct {
+	Current    int
+	Total      int
+	Artist     string
+	Title      string
+	DurationMs int64
+	Found      bool
+}
+
+type DurationProgressFunc func(p DurationProgress)
+
+type DurationSyncResult struct {
+	Processed int
+	Updated   int
+	NotFound  int
+}
+
+type missingDurationTrack struct {
+	Artist string
+	Title  string
 }
 
 // ResolveUnlinkedScrobbles mengambil scrobble yang track_id-nya masih NULL,
@@ -275,4 +298,116 @@ func parseTrackKey(key string) (string, string, string) {
 		return parts[0], parts[1], parts[2]
 	}
 	return "", "", ""
+}
+
+// SyncTrackDurations mengambil durasi lagu aktual dari Last.fm (track.getInfo)
+// untuk semua track di tabel tracks yang kolom duration_ms-nya masih NULL atau 0.
+func (s *ScrobbleService) SyncTrackDurations(ctx context.Context, onProgress DurationProgressFunc) (*DurationSyncResult, error) {
+	// Ambil pasangan unik (artist, title) yang belum memiliki duration_ms
+	query := `
+		SELECT DISTINCT a.name, t.title
+		FROM tracks t
+		JOIN artists a ON t.artist_id = a.id
+		WHERE t.duration_ms IS NULL OR t.duration_ms <= 0
+		ORDER BY a.name ASC, t.title ASC
+	`
+
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("gagal query tracks tanpa durasi: %w", err)
+	}
+
+	var targets []missingDurationTrack
+	for rows.Next() {
+		var item missingDurationTrack
+		if err := rows.Scan(&item.Artist, &item.Title); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("gagal scan baris track: %w", err)
+		}
+		targets = append(targets, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("error iterasi baris tracks: %w", err)
+	}
+	rows.Close()
+
+	res := &DurationSyncResult{}
+	total := len(targets)
+	if total == 0 {
+		return res, nil
+	}
+
+	// Cache in-memory selama satu sesi sync agar judul kanonik yang sama
+	// (dari beberapa varian album atau alias) hanya di-fetch 1x dari API Last.fm.
+	apiCache := make(map[string]int64)
+
+	updateStmt, err := s.db.PrepareContext(ctx, `
+		UPDATE tracks
+		SET duration_ms = ?
+		WHERE title = ?
+		  AND artist_id IN (SELECT id FROM artists WHERE name = ?)
+	`)
+	if err != nil {
+		return res, fmt.Errorf("gagal menyiapkan statement update duration_ms: %w", err)
+	}
+	defer updateStmt.Close()
+
+	for i, item := range targets {
+		select {
+		case <-ctx.Done():
+			return res, ctx.Err()
+		default:
+		}
+
+		res.Processed++
+		canonicalTitle := s.canonicalTrackTitle(item.Artist, item.Title)
+		cacheKey := normalizeKey(item.Artist) + "\x00" + normalizeKey(canonicalTitle)
+
+		durationMs, cached := apiCache[cacheKey]
+		if !cached {
+			info, err := s.client.GetTrackInfo(ctx, item.Artist, canonicalTitle)
+			if err != nil {
+				// Jika Last.fm tidak menemukan track (misal error 6: Track not found), catat 0 dan lanjutkan
+				durationMs = 0
+			} else if info != nil && info.Track.Duration != "" {
+				parsed, parseErr := strconv.ParseInt(strings.TrimSpace(info.Track.Duration), 10, 64)
+				if parseErr == nil && parsed > 0 {
+					durationMs = parsed
+				}
+			}
+
+			apiCache[cacheKey] = durationMs
+
+			// Rate-limit 300ms antar panggilan API Last.fm
+			select {
+			case <-time.After(300 * time.Millisecond):
+			case <-ctx.Done():
+				return res, ctx.Err()
+			}
+		}
+
+		found := durationMs > 0
+		if found {
+			if _, err := updateStmt.ExecContext(ctx, durationMs, item.Title, item.Artist); err != nil {
+				return res, fmt.Errorf("gagal menyimpan durasi untuk %q - %q: %w", item.Artist, item.Title, err)
+			}
+			res.Updated++
+		} else {
+			res.NotFound++
+		}
+
+		if onProgress != nil {
+			onProgress(DurationProgress{
+				Current:    i + 1,
+				Total:      total,
+				Artist:     item.Artist,
+				Title:      item.Title,
+				DurationMs: durationMs,
+				Found:      found,
+			})
+		}
+	}
+
+	return res, nil
 }
