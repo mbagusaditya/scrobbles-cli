@@ -13,13 +13,11 @@ type StatsFilter struct {
 }
 
 type StatsResult struct {
-	// Ringkasan Utama
 	TotalScrobbles int
 	TotalArtists   int
 	TotalAlbums    int
 	TotalTracks    int
 
-	// Rentang & Metrik Tambahan
 	FirstScrobble time.Time
 	LastScrobble  time.Time
 	ActiveDays    int
@@ -31,14 +29,10 @@ type StatsResult struct {
 	RepeatRatio   float64
 }
 
-// normalizeKey menormalisasi string (trim spasi & lowercase) agar konsisten
-// antara kalkulasi in-memory Go dan grouping SQLite.
 func normalizeKey(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
 }
 
-// calcInclusiveCalendarDays menghitung jumlah hari kalender secara inklusif
-// berdasarkan titik tengah hari (12:00:00) agar kebal terhadap selisih jam/menit.
 func calcInclusiveCalendarDays(start, end time.Time) int {
 	s := time.Date(start.Year(), start.Month(), start.Day(), 12, 0, 0, 0, start.Location())
 	e := time.Date(end.Year(), end.Month(), end.Day(), 12, 0, 0, 0, end.Location())
@@ -66,7 +60,6 @@ func (s *ScrobbleService) GetStats(ctx context.Context, filter StatsFilter) (*St
 		whereClause = "WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	// 1 kali scan linier murni: Turso hanya membaca baris data persis sebanyak jumlah log
 	query := fmt.Sprintf(`
 		SELECT
 			raw_artist,
@@ -84,12 +77,11 @@ func (s *ScrobbleService) GetStats(ctx context.Context, filter StatsFilter) (*St
 	}
 	defer rows.Close()
 
-	// In-memory set & counter di Go (zero cost reads ke Turso)
 	artistSet := make(map[string]struct{})
 	albumSet := make(map[string]struct{})
 	trackSet := make(map[string]struct{})
-	dayCounts := make(map[string]int) // "YYYY-MM-DD" -> count
-	hourCounts := make(map[int]int)   // 0-23 -> count
+	dayCounts := make(map[string]int)
+	hourCounts := make(map[int]int)
 
 	var totalScrobbles int
 	var firstPlayed, lastPlayed time.Time
@@ -109,26 +101,24 @@ func (s *ScrobbleService) GetStats(ctx context.Context, filter StatsFilter) (*St
 		lastPlayed = t
 		totalScrobbles++
 
+		canonicalTitle := s.canonicalTrackTitle(artist, title)
+
 		normArtist := normalizeKey(artist)
 		normAlbum := normalizeKey(album)
-		normTitle := normalizeKey(title)
+		normTitle := normalizeKey(canonicalTitle)
 
-		// Unique Artists (selaras dengan ListLibraryArtists)
 		if normArtist != "" {
 			artistSet[normArtist] = struct{}{}
 		}
 
-		// Unique Albums (selaras dengan ListLibraryAlbums: kombinasi album + artist)
 		if normAlbum != "" {
 			albumSet[normArtist+"\x00"+normAlbum] = struct{}{}
 		}
 
-		// Unique Tracks (selaras dengan ListLibraryTracks: kombinasi title + artist)
 		if normTitle != "" {
 			trackSet[normArtist+"\x00"+normTitle] = struct{}{}
 		}
 
-		// Distribusi waktu
 		dayCounts[t.Format("2006-01-02")]++
 		hourCounts[t.Hour()]++
 	}
@@ -141,7 +131,6 @@ func (s *ScrobbleService) GetStats(ctx context.Context, filter StatsFilter) (*St
 		return &StatsResult{}, nil
 	}
 
-	// Hitung TotalDays berdasarkan batas kalender inklusif
 	activeDays := len(dayCounts)
 	rangeStart := firstPlayed
 	rangeEnd := lastPlayed

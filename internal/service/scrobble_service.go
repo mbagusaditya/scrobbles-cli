@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/mbagusaditya/scrobbles-cli/internal/lastfm"
@@ -22,14 +23,25 @@ type ListFilter struct {
 type ScrobbleService struct {
 	db     *sql.DB
 	client *lastfm.Client
+	alias  *AliasService
 }
 
-func NewScrobbleService(database *sql.DB, client *lastfm.Client) *ScrobbleService {
-	return &ScrobbleService{db: database, client: client}
+func NewScrobbleService(database *sql.DB, client *lastfm.Client, alias *AliasService) *ScrobbleService {
+	return &ScrobbleService{
+		db:     database,
+		client: client,
+		alias:  alias,
+	}
 }
 
-// MaxCustomRangeDays adalah batas maksimal rentang tanggal yang boleh
-// diminta untuk custom range sync (dipakai untuk validasi di cmd).
+// canonicalTrackTitle mengembalikan judul kanonik dari AliasService jika tersedia.
+func (s *ScrobbleService) canonicalTrackTitle(artist, title string) string {
+	if s.alias != nil {
+		return s.alias.ResolveTrackTitle(artist, title)
+	}
+	return strings.TrimSpace(title)
+}
+
 const MaxCustomRangeDays = 7
 
 type SyncResult struct {
@@ -38,25 +50,16 @@ type SyncResult struct {
 	Fetched  int
 }
 
-// PageProgress berisi ringkasan hasil pemrosesan satu halaman, dikirim
-// ke ProgressFunc setelah tiap halaman selesai diambil dan disimpan.
 type PageProgress struct {
 	Page       int
 	TotalPages int
-	Fetched    int // jumlah track valid (non now-playing) di halaman ini
+	Fetched    int
 	Inserted   int
 	Skipped    int
 }
 
-// ProgressFunc dipanggil setelah tiap halaman selesai diproses selama
-// FetchRange/SyncLatest berjalan. Boleh nil kalau tidak butuh feedback.
-// Service sengaja tidak melakukan print apapun sendiri -- itu tanggung
-// jawab pemanggil (cmd), service cuma melaporkan progress lewat callback.
 type ProgressFunc func(p PageProgress)
 
-// SyncLatest mengambil scrobble baru dari Last.fm sejak scrobble terakhir
-// yang tersimpan di database sampai saat ini. Kalau database masih kosong
-// (belum pernah sync sama sekali), otomatis mengambil dari awal history.
 func (s *ScrobbleService) SyncLatest(ctx context.Context, onProgress ProgressFunc) (*SyncResult, error) {
 	lastPlayedAt, err := s.getLastPlayedAt(ctx)
 	if err != nil {
@@ -66,16 +69,7 @@ func (s *ScrobbleService) SyncLatest(ctx context.Context, onProgress ProgressFun
 	return s.FetchRange(ctx, lastPlayedAt, time.Now(), onProgress)
 }
 
-// FetchRange mengambil seluruh scrobble dalam rentang [from, to] dari
-// Last.fm, melakukan pagination otomatis sampai seluruh halaman habis,
-// dan menyimpan hasilnya (duplikat otomatis di-skip). Ini adalah inti
-// mekanisme yang dipakai oleh semua mode sync (harian, mingguan, custom
-// range, maupun incremental via SyncLatest).
-//
-// Kirim time.Time{} (zero value) pada from untuk tidak membatasi batas
-// bawah (ambil dari awal history). onProgress boleh nil.
 func (s *ScrobbleService) FetchRange(ctx context.Context, from, to time.Time, onProgress ProgressFunc) (*SyncResult, error) {
-	// Jika from kosong (misal user hanya isi --to), ambil titik awal dari scrobble terakhir di DB
 	if from.IsZero() {
 		lastPlayed, err := s.getLastPlayedAt(ctx)
 		if err != nil {
@@ -93,17 +87,15 @@ func (s *ScrobbleService) FetchRange(ctx context.Context, from, to time.Time, on
 			return result, fmt.Errorf("gagal fetch halaman %d dari Last.fm: %w", page, err)
 		}
 
-		// Jeda 500ms setelah fetch data agar mematuhi rate limit Last.fm
 		select {
 		case <-time.After(500 * time.Millisecond):
 		case <-ctx.Done():
 			return result, ctx.Err()
 		}
 
-		scrobbles := mapTracksToScrobbles(resp.RecentTracks.Tracks)
+		scrobbles := s.mapTracksToScrobbles(resp.RecentTracks.Tracks)
 		result.Fetched += len(scrobbles)
 
-		// Insert dan commit langsung per halaman (batch)
 		inserted, skipped, err := s.insertScrobbles(ctx, scrobbles)
 		if err != nil {
 			return result, fmt.Errorf("gagal insert batch halaman %d: %w", page, err)
@@ -132,7 +124,7 @@ func (s *ScrobbleService) FetchRange(ctx context.Context, from, to time.Time, on
 	return result, nil
 }
 
-func mapTracksToScrobbles(tracks lastfm.TrackList) []*model.Scrobble {
+func (s *ScrobbleService) mapTracksToScrobbles(tracks lastfm.TrackList) []*model.Scrobble {
 	scrobbles := make([]*model.Scrobble, 0, len(tracks))
 
 	for _, t := range tracks {
@@ -145,8 +137,10 @@ func mapTracksToScrobbles(tracks lastfm.TrackList) []*model.Scrobble {
 			continue
 		}
 
+		canonicalTitle := s.canonicalTrackTitle(t.Artist.Text, t.Name)
+
 		scrobbles = append(scrobbles, model.NewScrobble(
-			t.Name,
+			canonicalTitle,
 			t.Artist.Text,
 			t.Album.Text,
 			playedAt,
@@ -231,7 +225,6 @@ func (s *ScrobbleService) getLastPlayedAt(ctx context.Context) (time.Time, error
 }
 
 func (s *ScrobbleService) ListScrobbles(ctx context.Context, filter ListFilter) ([]*model.Scrobble, error) {
-	// 1. Normalisasi limit dan page ke offset SQL
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = 50
@@ -245,7 +238,6 @@ func (s *ScrobbleService) ListScrobbles(ctx context.Context, filter ListFilter) 
 	}
 	offset := (page - 1) * limit
 
-	// 2. Susun dynamic SQL query dan binding argumen
 	query := `
 		SELECT id, track_id, raw_title, raw_artist, raw_album, played_at, created_at
 		FROM scrobble_logs
@@ -276,14 +268,12 @@ func (s *ScrobbleService) ListScrobbles(ctx context.Context, filter ListFilter) 
 	query += " ORDER BY played_at DESC LIMIT ? OFFSET ?"
 	args = append(args, limit, offset)
 
-	// 3. Eksekusi query
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("gagal query list scrobbles: %w", err)
 	}
 	defer rows.Close()
 
-	// 4. Scan baris ke struct model.Scrobble
 	var results []*model.Scrobble
 	for rows.Next() {
 		var (

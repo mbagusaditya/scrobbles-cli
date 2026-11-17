@@ -13,12 +13,10 @@ import (
 	"github.com/mbagusaditya/scrobbles-cli/internal/service"
 )
 
-// app menampung seluruh dependency yang dibutuhkan oleh subcommand.
-// Diinisialisasi sekali di PersistentPreRunE root command, lalu dipakai
-// oleh subcommand lain (sync.go, list.go, dst) dalam package cmd yang sama.
 var app struct {
 	config          *config.Config
 	database        *sql.DB
+	aliasService    *service.AliasService
 	scrobbleService *service.ScrobbleService
 }
 
@@ -40,13 +38,15 @@ scrobble musik dari Last.fm ke database Turso kamu sendiri.`,
 	SilenceUsage:  true,
 }
 
-// initApp memuat konfigurasi dari .env, membuka koneksi ke database
-// Turso, dan menyiapkan service yang dibutuhkan seluruh subcommand.
-// Dipanggil otomatis sebelum subcommand manapun dieksekusi.
 func initApp() error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("gagal memuat konfigurasi: %w", err)
+	}
+
+	aliasSvc, err := service.NewAliasService("")
+	if err != nil {
+		return fmt.Errorf("gagal memuat konfigurasi alias: %w", err)
 	}
 
 	database, err := db.Connect(cfg)
@@ -58,13 +58,12 @@ func initApp() error {
 
 	app.config = cfg
 	app.database = database
-	app.scrobbleService = service.NewScrobbleService(database, client)
+	app.aliasService = aliasSvc
+	app.scrobbleService = service.NewScrobbleService(database, client, aliasSvc)
 
 	return nil
 }
 
-// Execute menjalankan root command beserta seluruh subcommand yang
-// terdaftar. Dipanggil dari main.go sebagai satu-satunya entry point.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

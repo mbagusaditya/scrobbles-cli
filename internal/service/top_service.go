@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ type TopFilter struct {
 }
 
 // GetTopTracks mengambil daftar lagu (track) yang paling sering didengarkan beserta nama artisnya.
+// Ganti fungsi GetTopTracks di internal/service/top_service.go dengan versi ini:
 func (s *ScrobbleService) GetTopTracks(ctx context.Context, filter TopFilter) ([]model.TopItem, error) {
 	if filter.Limit <= 0 {
 		filter.Limit = 10
@@ -40,15 +42,11 @@ func (s *ScrobbleService) GetTopTracks(ctx context.Context, filter TopFilter) ([
 	}
 
 	query := fmt.Sprintf(`
-		SELECT raw_title, raw_artist, COUNT(*) as play_count
+		SELECT MIN(TRIM(raw_title)), MIN(TRIM(raw_artist)), COUNT(*) as play_count
 		FROM scrobble_logs
 		%s
-		GROUP BY raw_title, raw_artist
-		ORDER BY play_count DESC, raw_title ASC
-		LIMIT ?
+		GROUP BY LOWER(TRIM(raw_title)), LOWER(TRIM(raw_artist))
 	`, whereClause)
-
-	args = append(args, filter.Limit)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -56,16 +54,50 @@ func (s *ScrobbleService) GetTopTracks(ctx context.Context, filter TopFilter) ([
 	}
 	defer rows.Close()
 
-	var results []model.TopItem
+	mergedMap := make(map[string]*model.TopItem)
 	for rows.Next() {
-		var item model.TopItem
-		if err := rows.Scan(&item.Name, &item.Detail, &item.Count); err != nil {
+		var rawTitle, rawArtist string
+		var count int
+		if err := rows.Scan(&rawTitle, &rawArtist, &count); err != nil {
 			return nil, fmt.Errorf("gagal membaca baris top tracks: %w", err)
 		}
-		results = append(results, item)
+
+		canonicalTitle := s.canonicalTrackTitle(rawArtist, rawTitle)
+		key := normalizeKey(rawArtist) + "\x00" + normalizeKey(canonicalTitle)
+
+		if existing, ok := mergedMap[key]; ok {
+			existing.Count += count
+			existing.Name = canonicalTitle
+		} else {
+			mergedMap[key] = &model.TopItem{
+				Name:   canonicalTitle,
+				Detail: rawArtist,
+				Count:  count,
+			}
+		}
 	}
 
-	return results, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	results := make([]model.TopItem, 0, len(mergedMap))
+	for _, item := range mergedMap {
+		results = append(results, *item)
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Count != results[j].Count {
+			return results[i].Count > results[j].Count
+		}
+		return strings.ToLower(results[i].Name) < strings.ToLower(results[j].Name)
+	})
+
+	if len(results) > filter.Limit {
+		results = results[:filter.Limit]
+	}
+
+	return results, nil
 }
 
 // GetTopArtists mengambil daftar artis yang paling sering didengarkan berdasarkan rentang waktu.

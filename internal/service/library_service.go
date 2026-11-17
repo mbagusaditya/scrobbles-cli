@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/mbagusaditya/scrobbles-cli/internal/model"
 )
@@ -175,23 +177,59 @@ func (s *ScrobbleService) ListLibraryAlbums(ctx context.Context, filter model.Li
 }
 
 // ListLibraryTracks mengambil daftar trek unik beserta artisnya diurutkan A-Z.
+// Ganti fungsi ListLibraryTracks di internal/service/library_service.go dengan versi ini:
 func (s *ScrobbleService) ListLibraryTracks(ctx context.Context, filter model.LibraryFilter) (*model.LibraryResult, error) {
 	page, limit, offset := normalizePagination(filter)
 
-	// 1. Hitung total pasangan (raw_title, raw_artist) unik
-	countQuery := `
-		SELECT COUNT(*) FROM (
-			SELECT LOWER(TRIM(raw_title)), LOWER(TRIM(raw_artist))
-			FROM scrobble_logs
-			WHERE TRIM(raw_title) != ''
-			GROUP BY LOWER(TRIM(raw_title)), LOWER(TRIM(raw_artist))
-		)
+	query := `
+		SELECT MIN(TRIM(raw_title)), MIN(TRIM(raw_artist)), COUNT(*) as play_count
+		FROM scrobble_logs
+		WHERE TRIM(raw_title) != ''
+		GROUP BY LOWER(TRIM(raw_title)), LOWER(TRIM(raw_artist))
 	`
-	var totalItems int
-	if err := s.db.QueryRowContext(ctx, countQuery).Scan(&totalItems); err != nil {
-		return nil, fmt.Errorf("gagal menghitung total tracks di pustaka: %w", err)
+
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("gagal query list library tracks: %w", err)
+	}
+	defer rows.Close()
+
+	type trackAgg struct {
+		title  string
+		artist string
+		plays  int
 	}
 
+	mergedMap := make(map[string]*trackAgg)
+
+	for rows.Next() {
+		var rawTitle, rawArtist string
+		var playCount int
+		if err := rows.Scan(&rawTitle, &rawArtist, &playCount); err != nil {
+			return nil, fmt.Errorf("gagal scan baris library track: %w", err)
+		}
+
+		canonicalTitle := s.canonicalTrackTitle(rawArtist, rawTitle)
+		key := normalizeKey(rawArtist) + "\x00" + normalizeKey(canonicalTitle)
+
+		if existing, ok := mergedMap[key]; ok {
+			existing.plays += playCount
+			// Pertahankan casing dari judul kanonik
+			existing.title = canonicalTitle
+		} else {
+			mergedMap[key] = &trackAgg{
+				title:  canonicalTitle,
+				artist: rawArtist,
+				plays:  playCount,
+			}
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterasi library tracks: %w", err)
+	}
+
+	totalItems := len(mergedMap)
 	if totalItems == 0 {
 		return &model.LibraryResult{
 			Items:      []model.LibraryItem{},
@@ -202,37 +240,43 @@ func (s *ScrobbleService) ListLibraryTracks(ctx context.Context, filter model.Li
 		}, nil
 	}
 
-	// 2. Ambil data trek unik diurutkan A-Z berdasarkan judul trek
-	query := `
-		SELECT MIN(TRIM(raw_title)), MIN(TRIM(raw_artist)), COUNT(*) as play_count
-		FROM scrobble_logs
-		WHERE TRIM(raw_title) != ''
-		GROUP BY LOWER(TRIM(raw_title)), LOWER(TRIM(raw_artist))
-		ORDER BY MIN(TRIM(raw_title)) COLLATE NOCASE ASC, MIN(TRIM(raw_artist)) COLLATE NOCASE ASC
-		LIMIT ? OFFSET ?
-	`
-
-	rows, err := s.db.QueryContext(ctx, query, limit, offset)
-	if err != nil {
-		return nil, fmt.Errorf("gagal query list library tracks: %w", err)
+	allItems := make([]model.LibraryItem, 0, totalItems)
+	for _, agg := range mergedMap {
+		allItems = append(allItems, model.LibraryItem{
+			Name:       agg.title,
+			Detail:     agg.artist,
+			TotalPlays: agg.plays,
+		})
 	}
-	defer rows.Close()
 
-	var items []model.LibraryItem
-	for rows.Next() {
-		var item model.LibraryItem
-		if err := rows.Scan(&item.Name, &item.Detail, &item.TotalPlays); err != nil {
-			return nil, fmt.Errorf("gagal scan baris library track: %w", err)
+	// Sort alfabetis A-Z case-insensitive (selaras dengan ORDER BY COLLATE NOCASE ASC)
+	sort.Slice(allItems, func(i, j int) bool {
+		ti := strings.ToLower(allItems[i].Name)
+		tj := strings.ToLower(allItems[j].Name)
+		if ti != tj {
+			return ti < tj
 		}
-		items = append(items, item)
+		return strings.ToLower(allItems[i].Detail) < strings.ToLower(allItems[j].Detail)
+	})
+
+	// Terapkan pagination slice
+	if offset >= totalItems {
+		return &model.LibraryResult{
+			Items:      []model.LibraryItem{},
+			TotalItems: totalItems,
+			Page:       page,
+			Limit:      limit,
+			TotalPages: calculateTotalPages(totalItems, limit),
+		}, nil
 	}
 
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterasi library tracks: %w", err)
+	end := offset + limit
+	if end > totalItems {
+		end = totalItems
 	}
 
 	return &model.LibraryResult{
-		Items:      items,
+		Items:      allItems[offset:end],
 		TotalItems: totalItems,
 		Page:       page,
 		Limit:      limit,
