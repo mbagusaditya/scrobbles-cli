@@ -163,15 +163,19 @@ func runTop(cmd *cobra.Command, targetType string) error {
 
 	// 3. Eksekusi query sesuai target subcommand
 	var items []model.TopItem
-	var err error
+
+	topSvc, err := app.TopService()
+	if err != nil {
+		return humanizeError(err)
+	}
 
 	switch targetType {
 	case "Artist":
-		items, err = app.topSvc.GetTopArtists(ctx, filter)
+		items, err = topSvc.GetTopArtists(ctx, filter)
 	case "Album":
-		items, err = app.topSvc.GetTopAlbums(ctx, filter)
+		items, err = topSvc.GetTopAlbums(ctx, filter)
 	case "Track":
-		items, err = app.topSvc.GetTopTracks(ctx, filter)
+		items, err = topSvc.GetTopTracks(ctx, filter)
 	}
 
 	if err != nil {

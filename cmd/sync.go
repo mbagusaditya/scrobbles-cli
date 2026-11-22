@@ -188,7 +188,12 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	result, err := app.scrobbleSvc.FetchRange(ctx, fromTime, toTime, onProgress)
+	scrobbleSvc, err := app.ScrobbleService()
+	if err != nil {
+		return humanizeError(err)
+	}
+
+	result, err := scrobbleSvc.FetchRange(ctx, fromTime, toTime, onProgress)
 	sp.stopSpinner()
 
 	if err != nil {

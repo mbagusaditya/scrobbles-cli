@@ -131,7 +131,12 @@ func runStats(cmd *cobra.Command, args []string) error {
 		To:   toTime,
 	}
 
-	stats, err := app.statsSvc.GetStats(ctx, filter)
+	statsSvc, err := app.StatsService()
+	if err != nil {
+		return humanizeError(err)
+	}
+
+	stats, err := statsSvc.GetStats(ctx, filter)
 	if err != nil {
 		return humanizeError(err)
 	}

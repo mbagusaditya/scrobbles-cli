@@ -41,7 +41,12 @@ func runResolve(cmd *cobra.Command, args []string) error {
 		batchIndex++
 	}
 
-	res, err := app.resolverSvc.ResolveUnlinkedScrobbles(ctx, resolveBatchSize, onProgress)
+	resolverSvc, err := app.ResolverService()
+	if err != nil {
+		return humanizeError(err)
+	}
+
+	res, err := resolverSvc.ResolveUnlinkedScrobbles(ctx, resolveBatchSize, onProgress)
 	if err != nil {
 		return humanizeError(err)
 	}
@@ -66,7 +71,7 @@ func runResolve(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		durRes, err := app.resolverSvc.SyncTrackDurations(ctx, onDurProgress)
+		durRes, err := resolverSvc.SyncTrackDurations(ctx, onDurProgress)
 		if err != nil {
 			return humanizeError(err)
 		}

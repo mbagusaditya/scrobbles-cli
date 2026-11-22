@@ -84,15 +84,19 @@ func runLibraryList(cmd *cobra.Command, targetType string) error {
 
 	// 2. Eksekusi query service berdasarkan tipe
 	var result *model.LibraryResult
-	var err error
+
+	librarySvc, err := app.LibraryService()
+	if err != nil {
+		return humanizeError(err)
+	}
 
 	switch targetType {
 	case "Artist":
-		result, err = app.librarySvc.ListLibraryArtists(ctx, filter)
+		result, err = librarySvc.ListLibraryArtists(ctx, filter)
 	case "Album":
-		result, err = app.librarySvc.ListLibraryAlbums(ctx, filter)
+		result, err = librarySvc.ListLibraryAlbums(ctx, filter)
 	case "Track":
-		result, err = app.librarySvc.ListLibraryTracks(ctx, filter)
+		result, err = librarySvc.ListLibraryTracks(ctx, filter)
 	}
 
 	if err != nil {

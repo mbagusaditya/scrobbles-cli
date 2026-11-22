@@ -62,15 +62,19 @@ func runLatest(cmd *cobra.Command, targetType string) error {
 	ctx := cmd.Context()
 
 	var items []model.LatestItem
-	var err error
+
+	latestSvc, err := app.LatestService()
+	if err != nil {
+		return humanizeError(err)
+	}
 
 	switch targetType {
 	case "Artist":
-		items, err = app.latestSvc.GetLatestArtists(ctx, latestLimit)
+		items, err = latestSvc.GetLatestArtists(ctx, latestLimit)
 	case "Album":
-		items, err = app.latestSvc.GetLatestAlbums(ctx, latestLimit)
+		items, err = latestSvc.GetLatestAlbums(ctx, latestLimit)
 	case "Track":
-		items, err = app.latestSvc.GetLatestTracks(ctx, latestLimit)
+		items, err = latestSvc.GetLatestTracks(ctx, latestLimit)
 	}
 
 	if err != nil {

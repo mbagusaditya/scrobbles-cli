@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/mbagusaditya/scrobbles-cli/internal/service"
 	"github.com/spf13/cobra"
 )
 
@@ -11,6 +12,7 @@ var (
 	aliasArtist string
 	aliasFrom   string
 	aliasTo     string
+	aliasSvc    *service.AliasService
 )
 
 var aliasCmd = &cobra.Command{
@@ -18,14 +20,32 @@ var aliasCmd = &cobra.Command{
 	Short: "Mengelola pemetaan alias judul lagu lokal (aliases.json)",
 	Long: `Mengelola aturan normalisasi judul track pada file JSON lokal (~/.config/scrobbles/aliases.json)
 untuk menggabungkan statistik lagu duplikat (misal variasi Kanji vs Romaji) tanpa mengubah database.`,
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// PENTING: Jika rootCmd juga punya PersistentPreRunE, panggil dulu agar tidak tertimpa
+		if rootCmd.PersistentPreRunE != nil {
+			if err := rootCmd.PersistentPreRunE(cmd, args); err != nil {
+				return err
+			}
+		}
+
+		var err error
+
+		aliasSvc, err = app.AliasService()
+
+		if err != nil {
+			return humanizeError(err)
+		}
+
+		return nil
+	},
 }
 
 var aliasListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "Menampilkan daftar aturan alias yang aktif",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		aliases := app.aliasSvc.ListTrackAliases()
-		fmt.Printf("File konfigurasi: %s\n\n", app.aliasSvc.ConfigPath())
+		aliases := aliasSvc.ListTrackAliases()
+		fmt.Printf("File konfigurasi: %s\n\n", aliasSvc.ConfigPath())
 
 		if len(aliases) == 0 {
 			fmt.Println("Belum ada aturan alias yang terdaftar.")
@@ -45,7 +65,7 @@ var aliasAddCmd = &cobra.Command{
 	Short:   "Menambahkan aturan alias judul lagu baru",
 	Example: `  scrobbles alias add -a "MyGO!!!!!" --from "孤壊牢 - KOKORO" --to "孤壊牢"`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := app.aliasSvc.AddTrackAlias(aliasArtist, aliasFrom, aliasTo); err != nil {
+		if err := aliasSvc.AddTrackAlias(aliasArtist, aliasFrom, aliasTo); err != nil {
 			return humanizeError(err)
 		}
 
@@ -65,7 +85,7 @@ var aliasRemoveCmd = &cobra.Command{
 			return fmt.Errorf("nomor indeks harus berupa angka: %w", err)
 		}
 
-		removed, err := app.aliasSvc.RemoveTrackAlias(idx)
+		removed, err := aliasSvc.RemoveTrackAlias(idx)
 		if err != nil {
 			return humanizeError(err)
 		}
