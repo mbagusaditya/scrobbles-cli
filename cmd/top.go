@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mbagusaditya/scrobbles-cli/internal/model"
-	"github.com/mbagusaditya/scrobbles-cli/internal/service"
 )
 
 var (
@@ -156,7 +155,7 @@ func runTop(cmd *cobra.Command, targetType string) error {
 		}
 	}
 
-	filter := service.TopFilter{
+	filter := model.TopFilter{
 		From:  fromTime,
 		To:    toTime,
 		Limit: topLimit,
@@ -168,11 +167,11 @@ func runTop(cmd *cobra.Command, targetType string) error {
 
 	switch targetType {
 	case "Artist":
-		items, err = app.scrobbleService.GetTopArtists(ctx, filter)
+		items, err = app.topSvc.GetTopArtists(ctx, filter)
 	case "Album":
-		items, err = app.scrobbleService.GetTopAlbums(ctx, filter)
+		items, err = app.topSvc.GetTopAlbums(ctx, filter)
 	case "Track":
-		items, err = app.scrobbleService.GetTopTracks(ctx, filter)
+		items, err = app.topSvc.GetTopTracks(ctx, filter)
 	}
 
 	if err != nil {

@@ -1,85 +1,38 @@
 package service
 
 import (
-	// "database/sql"
 	"fmt"
 	"strings"
 
-	"github.com/mbagusaditya/scrobbles-cli/internal/config"
 	"github.com/mbagusaditya/scrobbles-cli/internal/model"
+	"github.com/mbagusaditya/scrobbles-cli/internal/repository"
 )
 
-type AliasService struct {
-	// db         *sql.DB
-	configPath string
-	cfg        *model.AliasConfig
-	lookup     map[string]string // key: "lower(artist)\x00lower(from)" -> value: canonical "To"
+const maxAliasResolutionHops = 5
+
+type aliasIndex map[string]string
+
+func newAliasIndex(tracks []model.TrackAlias) aliasIndex {
+	idx := make(aliasIndex, len(tracks))
+	for _, item := range tracks {
+		idx[aliasKey(item.Artist, item.From)] = strings.TrimSpace(item.To)
+	}
+	return idx
 }
 
-// NewAliasService menginisialisasi AliasService dan memuat aliases.json ke memori.
-// Parameter db boleh nil jika hanya dipakai untuk operasi file lokal tanpa DB backfill.
-func NewAliasService(configPath string) (*AliasService, error) {
-	if configPath == "" {
-		var err error
-		configPath, err = config.ResolveAliasPath()
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	svc := &AliasService{
-		configPath: configPath,
-		lookup:     make(map[string]string),
-	}
-
-	if err := svc.Reload(); err != nil {
-		return nil, err
-	}
-
-	return svc, nil
-}
-
-// ConfigPath mengembalikan lokasi file aliases.json yang sedang aktif.
-func (s *AliasService) ConfigPath() string {
-	return s.configPath
-}
-
-// Reload memuat ulang aliases.json dari disk dan membangun kembali lookup map.
-func (s *AliasService) Reload() error {
-	cfg, err := config.LoadAliasConfig(s.configPath)
-	if err != nil {
-		return err
-	}
-
-	s.cfg = cfg
-	s.rebuildLookup()
-	return nil
-}
-
-func aliasLookupKey(artist, title string) string {
+func aliasKey(artist, title string) string {
 	return strings.ToLower(strings.TrimSpace(artist)) + "\x00" + strings.ToLower(strings.TrimSpace(title))
 }
 
-func (s *AliasService) rebuildLookup() {
-	s.lookup = make(map[string]string, len(s.cfg.Tracks))
-	for _, item := range s.cfg.Tracks {
-		key := aliasLookupKey(item.Artist, item.From)
-		s.lookup[key] = strings.TrimSpace(item.To)
-	}
-}
-
-// ResolveTrackTitle mengembalikan judul kanonik jika pasangan (artist, title)
-// terdaftar sebagai alias. Jika tidak terdaftar, mengembalikan title yang sudah di-trim.
-func (s *AliasService) ResolveTrackTitle(artist, title string) string {
+func (idx aliasIndex) resolve(artist, title string) string {
 	cleanTitle := strings.TrimSpace(title)
-	if s == nil || len(s.lookup) == 0 {
+	if len(idx) == 0 {
 		return cleanTitle
 	}
 
-	// Telusuri maksimal 5 hop untuk mendukung transitive alias (A -> B -> C)
 	current := cleanTitle
-	for i := 0; i < 5; i++ {
-		next, found := s.lookup[aliasLookupKey(artist, current)]
+	for range maxAliasResolutionHops {
+		next, found := idx[aliasKey(artist, current)]
 		if !found || strings.EqualFold(next, current) {
 			break
 		}
@@ -89,7 +42,88 @@ func (s *AliasService) ResolveTrackTitle(artist, title string) string {
 	return current
 }
 
-// ListTrackAliases mengembalikan seluruh daftar aturan alias yang tersimpan.
+// AliasService mengelola aturan normalisasi judul lagu dan pencarian kanonik in-memory.
+type AliasService struct {
+	repo  repository.AliasRepository
+	cfg   *model.AliasConfig
+	index aliasIndex
+}
+
+func NewAliasService(repo repository.AliasRepository) (*AliasService, error) {
+	if repo == nil {
+		return nil, fmt.Errorf("alias repository tidak boleh nil")
+	}
+
+	svc := &AliasService{
+		repo:  repo,
+		index: make(aliasIndex),
+	}
+
+	if err := svc.Reload(); err != nil {
+		return nil, err
+	}
+
+	return svc, nil
+}
+
+func (s *AliasService) ConfigPath() string {
+	return s.repo.Location()
+}
+
+func (s *AliasService) Reload() error {
+	cfg, err := s.repo.Load()
+	if err != nil {
+		return err
+	}
+
+	s.cfg = cfg
+	s.index = newAliasIndex(cfg.Tracks)
+	return nil
+}
+
+// ResolveTrackTitle mengembalikan judul kanonik untuk pasangan (artist, title).
+func (s *AliasService) ResolveTrackTitle(artist, title string) string {
+	if s == nil {
+		return strings.TrimSpace(title)
+	}
+	return s.index.resolve(artist, title)
+}
+
+// ExpandTrackTitles mengembalikan judul kanonik beserta seluruh varian judul alias
+// yang mengarah ke judul kanonik tersebut (dipakai untuk agregasi info track).
+func (s *AliasService) ExpandTrackTitles(artist, title string) (canonical string, variants []string) {
+	canonical = s.ResolveTrackTitle(artist, title)
+	if canonical == "" {
+		return "", nil
+	}
+
+	seen := map[string]struct{}{
+		strings.ToLower(canonical): {},
+	}
+	variants = []string{canonical}
+
+	if s == nil || s.cfg == nil {
+		return canonical, variants
+	}
+
+	cleanArtist := strings.TrimSpace(artist)
+	for _, rule := range s.cfg.Tracks {
+		if cleanArtist != "" && !strings.EqualFold(strings.TrimSpace(rule.Artist), cleanArtist) {
+			continue
+		}
+		if strings.EqualFold(s.index.resolve(rule.Artist, rule.From), canonical) {
+			fromClean := strings.TrimSpace(rule.From)
+			lowerFrom := strings.ToLower(fromClean)
+			if _, exists := seen[lowerFrom]; !exists && fromClean != "" {
+				seen[lowerFrom] = struct{}{}
+				variants = append(variants, fromClean)
+			}
+		}
+	}
+
+	return canonical, variants
+}
+
 func (s *AliasService) ListTrackAliases() []model.TrackAlias {
 	if s.cfg == nil {
 		return nil
@@ -99,56 +133,25 @@ func (s *AliasService) ListTrackAliases() []model.TrackAlias {
 	return res
 }
 
-// AddTrackAlias menambahkan atau memperbarui aturan alias baru ke aliases.json.
 func (s *AliasService) AddTrackAlias(artist, fromTitle, toTitle string) error {
 	artist = strings.TrimSpace(artist)
 	fromTitle = strings.TrimSpace(fromTitle)
 	toTitle = strings.TrimSpace(toTitle)
 
-	if artist == "" || fromTitle == "" || toTitle == "" {
-		return fmt.Errorf("artist, judul asal (--from), dan judul target (--to) tidak boleh kosong")
-	}
-
-	if strings.EqualFold(fromTitle, toTitle) {
-		return fmt.Errorf("judul asal dan judul target tidak boleh sama (%q)", fromTitle)
-	}
-
-	// Cek potensi circular alias (misal sudah ada rule toTitle -> fromTitle)
-	resolvedTarget := s.ResolveTrackTitle(artist, toTitle)
-	if strings.EqualFold(resolvedTarget, fromTitle) {
-		return fmt.Errorf("terdeteksi circular alias: %q sudah mengarah kembali ke %q", toTitle, fromTitle)
-	}
-
-	// Jika aturan untuk (artist, fromTitle) sudah ada, perbarui targetnya
-	updated := false
-	for i, existing := range s.cfg.Tracks {
-		if strings.EqualFold(strings.TrimSpace(existing.Artist), artist) &&
-			strings.EqualFold(strings.TrimSpace(existing.From), fromTitle) {
-			s.cfg.Tracks[i].Artist = artist
-			s.cfg.Tracks[i].From = fromTitle
-			s.cfg.Tracks[i].To = toTitle
-			updated = true
-			break
-		}
-	}
-
-	if !updated {
-		s.cfg.Tracks = append(s.cfg.Tracks, model.TrackAlias{
-			Artist: artist,
-			From:   fromTitle,
-			To:     toTitle,
-		})
-	}
-
-	if err := config.SaveAliasConfig(s.configPath, s.cfg); err != nil {
+	if err := s.validateRule(artist, fromTitle, toTitle); err != nil {
 		return err
 	}
 
-	s.rebuildLookup()
+	s.upsertRule(artist, fromTitle, toTitle)
+
+	if err := s.repo.Save(s.cfg); err != nil {
+		return err
+	}
+
+	s.index = newAliasIndex(s.cfg.Tracks)
 	return nil
 }
 
-// RemoveTrackAlias menghapus aturan alias berdasarkan nomor indeks 1-based (sesuai tampilan CLI).
 func (s *AliasService) RemoveTrackAlias(index int) (*model.TrackAlias, error) {
 	if index < 1 || index > len(s.cfg.Tracks) {
 		return nil, fmt.Errorf("indeks %d tidak valid (pilih antara 1 sampai %d)", index, len(s.cfg.Tracks))
@@ -157,56 +160,45 @@ func (s *AliasService) RemoveTrackAlias(index int) (*model.TrackAlias, error) {
 	removed := s.cfg.Tracks[index-1]
 	s.cfg.Tracks = append(s.cfg.Tracks[:index-1], s.cfg.Tracks[index:]...)
 
-	if err := config.SaveAliasConfig(s.configPath, s.cfg); err != nil {
+	if err := s.repo.Save(s.cfg); err != nil {
 		return nil, err
 	}
 
-	s.rebuildLookup()
+	s.index = newAliasIndex(s.cfg.Tracks)
 	return &removed, nil
 }
 
-// ApplyToDatabase memperbarui data historis di tabel scrobble_logs sesuai aturan aliases.json.
-// Mengembalikan jumlah total baris scrobble yang berhasil dinormalisasi.
-// func (s *AliasService) ApplyToDatabase(ctx context.Context) (int64, error) {
-// 	if s.db == nil {
-// 		return 0, fmt.Errorf("koneksi database tidak tersedia")
-// 	}
+func (s *AliasService) validateRule(artist, fromTitle, toTitle string) error {
+	if artist == "" || fromTitle == "" || toTitle == "" {
+		return fmt.Errorf("artist, judul asal (--from), dan judul target (--to) tidak boleh kosong")
+	}
 
-// 	if len(s.cfg.Tracks) == 0 {
-// 		return 0, nil
-// 	}
+	if strings.EqualFold(fromTitle, toTitle) {
+		return fmt.Errorf("judul asal dan judul target tidak boleh sama (%q)", fromTitle)
+	}
 
-// 	tx, err := s.db.BeginTx(ctx, nil)
-// 	if err != nil {
-// 		return 0, fmt.Errorf("gagal memulai transaksi database: %w", err)
-// 	}
-// 	defer tx.Rollback()
+	resolvedTarget := s.index.resolve(artist, toTitle)
+	if strings.EqualFold(resolvedTarget, fromTitle) {
+		return fmt.Errorf("terdeteksi circular alias: %q sudah mengarah kembali ke %q", toTitle, fromTitle)
+	}
 
-// 	const query = `
-// 		UPDATE scrobble_logs
-// 		SET raw_title = ?
-// 		WHERE LOWER(TRIM(raw_artist)) = LOWER(TRIM(?))
-// 		  AND LOWER(TRIM(raw_title)) = LOWER(TRIM(?))
-// 		  AND raw_title != ?
-// 	`
+	return nil
+}
 
-// 	var totalUpdated int64
-// 	for _, rule := range s.cfg.Tracks {
-// 		target := s.ResolveTrackTitle(rule.Artist, rule.From)
-// 		res, err := tx.ExecContext(ctx, query, target, rule.Artist, rule.From, target)
-// 		if err != nil {
-// 			return 0, fmt.Errorf("gagal menerapkan alias %q -> %q: %w", rule.From, target, err)
-// 		}
+func (s *AliasService) upsertRule(artist, fromTitle, toTitle string) {
+	for i, existing := range s.cfg.Tracks {
+		if strings.EqualFold(strings.TrimSpace(existing.Artist), artist) &&
+			strings.EqualFold(strings.TrimSpace(existing.From), fromTitle) {
+			s.cfg.Tracks[i].Artist = artist
+			s.cfg.Tracks[i].From = fromTitle
+			s.cfg.Tracks[i].To = toTitle
+			return
+		}
+	}
 
-// 		affected, err := res.RowsAffected()
-// 		if err == nil {
-// 			totalUpdated += affected
-// 		}
-// 	}
-
-// 	if err := tx.Commit(); err != nil {
-// 		return 0, fmt.Errorf("gagal commit perubahan alias ke database: %w", err)
-// 	}
-
-// 	return totalUpdated, nil
-// }
+	s.cfg.Tracks = append(s.cfg.Tracks, model.TrackAlias{
+		Artist: artist,
+		From:   fromTitle,
+		To:     toTitle,
+	})
+}

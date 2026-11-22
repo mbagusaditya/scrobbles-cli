@@ -2,125 +2,96 @@ package service
 
 import (
 	"context"
-	"fmt"
-	"time"
+	"sort"
+	"strings"
+
+	"github.com/mbagusaditya/scrobbles-cli/internal/model"
+	"github.com/mbagusaditya/scrobbles-cli/internal/repository"
 )
 
-// LatestItem merepresentasikan riwayat pemutaran terakhir dari artis, album, atau trek.
-type LatestItem struct {
-	Name     string
-	Detail   string // Nama artis (jika targetnya track/album)
-	PlayedAt time.Time
+const defaultLatestLimit = 10
+
+// LatestService menangani pengambilan daftar entitas yang terakhir kali diputar.
+type LatestService struct {
+	repo  repository.LatestRepository
+	alias *AliasService
+}
+
+func NewLatestService(repo repository.LatestRepository, alias *AliasService) *LatestService {
+	return &LatestService{
+		repo:  repo,
+		alias: alias,
+	}
+}
+
+func normalizeLatestLimit(limit int) int {
+	if limit <= 0 {
+		return defaultLatestLimit
+	}
+	return limit
 }
 
 // GetLatestArtists mengambil n artis unik terakhir yang diputar.
-func (s *ScrobbleService) GetLatestArtists(ctx context.Context, limit int) ([]LatestItem, error) {
-	if limit <= 0 {
-		limit = 10
-	}
-
-	// Mengambil waktu terakhir artis diputar dengan agregasi MAX(played_at)
-	query := `
-		SELECT raw_artist, MAX(played_at) as last_played
-		FROM scrobble_logs
-		GROUP BY raw_artist
-		ORDER BY last_played DESC
-		LIMIT ?
-	`
-
-	rows, err := s.db.QueryContext(ctx, query, limit)
-	if err != nil {
-		return nil, fmt.Errorf("gagal query latest artists: %w", err)
-	}
-	defer rows.Close()
-
-	var items []LatestItem
-	for rows.Next() {
-		var name string
-		var epoch int64
-		if err := rows.Scan(&name, &epoch); err != nil {
-			return nil, fmt.Errorf("gagal membaca baris latest artist: %w", err)
-		}
-		items = append(items, LatestItem{
-			Name:     name,
-			PlayedAt: time.Unix(epoch, 0).Local(),
-		})
-	}
-
-	return items, rows.Err()
+func (s *LatestService) GetLatestArtists(ctx context.Context, limit int) ([]model.LatestItem, error) {
+	return s.repo.GetLatestArtists(ctx, normalizeLatestLimit(limit))
 }
 
 // GetLatestAlbums mengambil n album unik terakhir yang diputar.
-func (s *ScrobbleService) GetLatestAlbums(ctx context.Context, limit int) ([]LatestItem, error) {
-	if limit <= 0 {
-		limit = 10
-	}
-
-	query := `
-		SELECT raw_album, raw_artist, MAX(played_at) as last_played
-		FROM scrobble_logs
-		WHERE raw_album IS NOT NULL AND raw_album != ''
-		GROUP BY raw_album, raw_artist
-		ORDER BY last_played DESC
-		LIMIT ?
-	`
-
-	rows, err := s.db.QueryContext(ctx, query, limit)
-	if err != nil {
-		return nil, fmt.Errorf("gagal query latest albums: %w", err)
-	}
-	defer rows.Close()
-
-	var items []LatestItem
-	for rows.Next() {
-		var album, artist string
-		var epoch int64
-		if err := rows.Scan(&album, &artist, &epoch); err != nil {
-			return nil, fmt.Errorf("gagal membaca baris latest album: %w", err)
-		}
-		items = append(items, LatestItem{
-			Name:     album,
-			Detail:   artist,
-			PlayedAt: time.Unix(epoch, 0).Local(),
-		})
-	}
-
-	return items, rows.Err()
+func (s *LatestService) GetLatestAlbums(ctx context.Context, limit int) ([]model.LatestItem, error) {
+	return s.repo.GetLatestAlbums(ctx, normalizeLatestLimit(limit))
 }
 
-// GetLatestTracks mengambil n trek unik terakhir yang diputar.
-func (s *ScrobbleService) GetLatestTracks(ctx context.Context, limit int) ([]LatestItem, error) {
-	if limit <= 0 {
-		limit = 10
-	}
+// GetLatestTracks mengambil n trek unik terakhir yang diputar, menggabungkan
+// varian alias dan mempertahankan waktu putar paling baru (latest PlayedAt).
+func (s *LatestService) GetLatestTracks(ctx context.Context, limit int) ([]model.LatestItem, error) {
+	limit = normalizeLatestLimit(limit)
 
-	query := `
-		SELECT raw_title, raw_artist, MAX(played_at) as last_played
-		FROM scrobble_logs
-		GROUP BY raw_title, raw_artist
-		ORDER BY last_played DESC
-		LIMIT ?
-	`
-
-	rows, err := s.db.QueryContext(ctx, query, limit)
+	rawItems, err := s.repo.GetAllTrackLastPlayed(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("gagal query latest tracks: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
 
-	var items []LatestItem
-	for rows.Next() {
-		var track, artist string
-		var epoch int64
-		if err := rows.Scan(&track, &artist, &epoch); err != nil {
-			return nil, fmt.Errorf("gagal membaca baris latest track: %w", err)
+	merged := make(map[string]*model.LatestItem, len(rawItems))
+	for _, item := range rawItems {
+		canonicalTitle := s.resolveTitle(item.Detail, item.Name)
+		key := aliasKey(item.Detail, canonicalTitle)
+
+		if existing, ok := merged[key]; ok {
+			if item.PlayedAt.After(existing.PlayedAt) {
+				existing.PlayedAt = item.PlayedAt
+			}
+			existing.Name = canonicalTitle
+		} else {
+			merged[key] = &model.LatestItem{
+				Name:     canonicalTitle,
+				Detail:   item.Detail,
+				PlayedAt: item.PlayedAt,
+			}
 		}
-		items = append(items, LatestItem{
-			Name:     track,
-			Detail:   artist,
-			PlayedAt: time.Unix(epoch, 0).Local(),
-		})
 	}
 
-	return items, rows.Err()
+	results := make([]model.LatestItem, 0, len(merged))
+	for _, item := range merged {
+		results = append(results, *item)
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		if !results[i].PlayedAt.Equal(results[j].PlayedAt) {
+			return results[i].PlayedAt.After(results[j].PlayedAt)
+		}
+		return strings.ToLower(results[i].Name) < strings.ToLower(results[j].Name)
+	})
+
+	if len(results) > limit {
+		results = results[:limit]
+	}
+
+	return results, nil
+}
+
+func (s *LatestService) resolveTitle(artist, title string) string {
+	if s.alias != nil {
+		return s.alias.ResolveTrackTitle(artist, title)
+	}
+	return strings.TrimSpace(title)
 }

@@ -2,15 +2,126 @@ package service
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/mbagusaditya/scrobbles-cli/internal/model"
+	"github.com/mbagusaditya/scrobbles-cli/internal/repository"
 )
 
-// normalizePagination memastikan page minimal 1 dan limit default 50.
+// LibraryService mengelola penjelajahan master katalog unik (artists, albums, tracks).
+type LibraryService struct {
+	repo  repository.LibraryRepository
+	alias *AliasService
+}
+
+func NewLibraryService(repo repository.LibraryRepository, alias *AliasService) *LibraryService {
+	return &LibraryService{
+		repo:  repo,
+		alias: alias,
+	}
+}
+
+// ListLibraryArtists mengambil daftar artis unik diurutkan A-Z beserta total scrobble-nya.
+func (s *LibraryService) ListLibraryArtists(ctx context.Context, filter model.LibraryFilter) (*model.LibraryResult, error) {
+	page, limit, offset := normalizePagination(filter)
+
+	totalItems, err := s.repo.CountUniqueArtists(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if totalItems == 0 || offset >= totalItems {
+		return buildLibraryPage([]model.LibraryItem{}, totalItems, page, limit), nil
+	}
+
+	items, err := s.repo.FetchPagedArtists(ctx, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+
+	return buildLibraryPage(items, totalItems, page, limit), nil
+}
+
+// ListLibraryAlbums mengambil daftar album unik (mengabaikan nilai kosong) diurutkan A-Z.
+func (s *LibraryService) ListLibraryAlbums(ctx context.Context, filter model.LibraryFilter) (*model.LibraryResult, error) {
+	page, limit, offset := normalizePagination(filter)
+
+	totalItems, err := s.repo.CountUniqueAlbums(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if totalItems == 0 || offset >= totalItems {
+		return buildLibraryPage([]model.LibraryItem{}, totalItems, page, limit), nil
+	}
+
+	items, err := s.repo.FetchPagedAlbums(ctx, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+
+	return buildLibraryPage(items, totalItems, page, limit), nil
+}
+
+// ListLibraryTracks mengambil daftar trek unik (sudah digabung berdasarkan aturan alias) diurutkan A-Z.
+func (s *LibraryService) ListLibraryTracks(ctx context.Context, filter model.LibraryFilter) (*model.LibraryResult, error) {
+	page, limit, offset := normalizePagination(filter)
+
+	rawItems, err := s.repo.FetchAllTrackCounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	merged := s.mergeAndSortTracks(rawItems)
+	totalItems := len(merged)
+
+	if totalItems == 0 || offset >= totalItems {
+		return buildLibraryPage([]model.LibraryItem{}, totalItems, page, limit), nil
+	}
+
+	end := min(offset+limit, totalItems)
+
+	return buildLibraryPage(merged[offset:end], totalItems, page, limit), nil
+}
+
+func (s *LibraryService) mergeAndSortTracks(rawItems []model.LibraryItem) []model.LibraryItem {
+	mergedMap := make(map[string]*model.LibraryItem, len(rawItems))
+
+	for _, raw := range rawItems {
+		canonicalTitle := raw.Name
+		if s.alias != nil {
+			canonicalTitle = s.alias.ResolveTrackTitle(raw.Detail, raw.Name)
+		}
+
+		key := aliasKey(raw.Detail, canonicalTitle)
+		if existing, ok := mergedMap[key]; ok {
+			existing.TotalPlays += raw.TotalPlays
+			existing.Name = canonicalTitle
+		} else {
+			mergedMap[key] = &model.LibraryItem{
+				Name:       canonicalTitle,
+				Detail:     raw.Detail,
+				TotalPlays: raw.TotalPlays,
+			}
+		}
+	}
+
+	allItems := make([]model.LibraryItem, 0, len(mergedMap))
+	for _, item := range mergedMap {
+		allItems = append(allItems, *item)
+	}
+
+	sort.Slice(allItems, func(i, j int) bool {
+		ti := strings.ToLower(allItems[i].Name)
+		tj := strings.ToLower(allItems[j].Name)
+		if ti != tj {
+			return ti < tj
+		}
+		return strings.ToLower(allItems[i].Detail) < strings.ToLower(allItems[j].Detail)
+	})
+
+	return allItems
+}
+
 func normalizePagination(filter model.LibraryFilter) (page int, limit int, offset int) {
 	limit = filter.Limit
 	if limit <= 0 {
@@ -28,7 +139,6 @@ func normalizePagination(filter model.LibraryFilter) (page int, limit int, offse
 	return page, limit, offset
 }
 
-// calculateTotalPages menghitung jumlah total halaman berdasarkan total item dan limit.
 func calculateTotalPages(totalItems, limit int) int {
 	if totalItems == 0 || limit <= 0 {
 		return 1
@@ -40,246 +150,15 @@ func calculateTotalPages(totalItems, limit int) int {
 	return totalPages
 }
 
-// ListLibraryArtists mengambil daftar artis unik diurutkan A-Z beserta total scrobble-nya.
-func (s *ScrobbleService) ListLibraryArtists(ctx context.Context, filter model.LibraryFilter) (*model.LibraryResult, error) {
-	page, limit, offset := normalizePagination(filter)
-
-	// 1. Hitung total artis unik (selaras dengan normalizeKey di stat_service.go)
-	countQuery := `
-		SELECT COUNT(DISTINCT LOWER(TRIM(raw_artist)))
-		FROM scrobble_logs
-		WHERE TRIM(raw_artist) != ''
-	`
-	var totalItems int
-	if err := s.db.QueryRowContext(ctx, countQuery).Scan(&totalItems); err != nil {
-		return nil, fmt.Errorf("gagal menghitung total artists di pustaka: %w", err)
+func buildLibraryPage(items []model.LibraryItem, totalItems, page, limit int) *model.LibraryResult {
+	if items == nil {
+		items = []model.LibraryItem{}
 	}
-
-	if totalItems == 0 {
-		return &model.LibraryResult{
-			Items:      []model.LibraryItem{},
-			TotalItems: 0,
-			Page:       page,
-			Limit:      limit,
-			TotalPages: 1,
-		}, nil
-	}
-
-	// 2. Ambil data dengan sorting A-Z case-insensitive
-	query := `
-		SELECT MIN(TRIM(raw_artist)), COUNT(*) as play_count
-		FROM scrobble_logs
-		WHERE TRIM(raw_artist) != ''
-		GROUP BY LOWER(TRIM(raw_artist))
-		ORDER BY MIN(TRIM(raw_artist)) COLLATE NOCASE ASC
-		LIMIT ? OFFSET ?
-	`
-
-	rows, err := s.db.QueryContext(ctx, query, limit, offset)
-	if err != nil {
-		return nil, fmt.Errorf("gagal query list library artists: %w", err)
-	}
-	defer rows.Close()
-
-	var items []model.LibraryItem
-	for rows.Next() {
-		var item model.LibraryItem
-		if err := rows.Scan(&item.Name, &item.TotalPlays); err != nil {
-			return nil, fmt.Errorf("gagal scan baris library artist: %w", err)
-		}
-		items = append(items, item)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterasi library artists: %w", err)
-	}
-
 	return &model.LibraryResult{
 		Items:      items,
 		TotalItems: totalItems,
 		Page:       page,
 		Limit:      limit,
 		TotalPages: calculateTotalPages(totalItems, limit),
-	}, nil
-}
-
-// ListLibraryAlbums mengambil daftar album unik (mengabaikan nilai kosong) diurutkan A-Z.
-func (s *ScrobbleService) ListLibraryAlbums(ctx context.Context, filter model.LibraryFilter) (*model.LibraryResult, error) {
-	page, limit, offset := normalizePagination(filter)
-
-	// 1. Hitung total kombinasi album dan artis unik yang valid
-	countQuery := `
-		SELECT COUNT(*) FROM (
-			SELECT LOWER(TRIM(raw_album)), LOWER(TRIM(raw_artist))
-			FROM scrobble_logs
-			WHERE raw_album IS NOT NULL AND TRIM(raw_album) != ''
-			GROUP BY LOWER(TRIM(raw_album)), LOWER(TRIM(raw_artist))
-		)
-	`
-	var totalItems int
-	if err := s.db.QueryRowContext(ctx, countQuery).Scan(&totalItems); err != nil {
-		return nil, fmt.Errorf("gagal menghitung total albums di pustaka: %w", err)
 	}
-
-	if totalItems == 0 {
-		return &model.LibraryResult{
-			Items:      []model.LibraryItem{},
-			TotalItems: 0,
-			Page:       page,
-			Limit:      limit,
-			TotalPages: 1,
-		}, nil
-	}
-
-	// 2. Ambil data album diurutkan A-Z berdasarkan judul album
-	query := `
-		SELECT MIN(TRIM(raw_album)), MIN(TRIM(raw_artist)), COUNT(*) as play_count
-		FROM scrobble_logs
-		WHERE raw_album IS NOT NULL AND TRIM(raw_album) != ''
-		GROUP BY LOWER(TRIM(raw_album)), LOWER(TRIM(raw_artist))
-		ORDER BY MIN(TRIM(raw_album)) COLLATE NOCASE ASC, MIN(TRIM(raw_artist)) COLLATE NOCASE ASC
-		LIMIT ? OFFSET ?
-	`
-
-	rows, err := s.db.QueryContext(ctx, query, limit, offset)
-	if err != nil {
-		return nil, fmt.Errorf("gagal query list library albums: %w", err)
-	}
-	defer rows.Close()
-
-	var items []model.LibraryItem
-	for rows.Next() {
-		var item model.LibraryItem
-		var album, artist sql.NullString
-		var playCount int
-
-		if err := rows.Scan(&album, &artist, &playCount); err != nil {
-			return nil, fmt.Errorf("gagal scan baris library album: %w", err)
-		}
-
-		item.Name = album.String
-		item.Detail = artist.String
-		item.TotalPlays = playCount
-		items = append(items, item)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterasi library albums: %w", err)
-	}
-
-	return &model.LibraryResult{
-		Items:      items,
-		TotalItems: totalItems,
-		Page:       page,
-		Limit:      limit,
-		TotalPages: calculateTotalPages(totalItems, limit),
-	}, nil
-}
-
-// ListLibraryTracks mengambil daftar trek unik beserta artisnya diurutkan A-Z.
-// Ganti fungsi ListLibraryTracks di internal/service/library_service.go dengan versi ini:
-func (s *ScrobbleService) ListLibraryTracks(ctx context.Context, filter model.LibraryFilter) (*model.LibraryResult, error) {
-	page, limit, offset := normalizePagination(filter)
-
-	query := `
-		SELECT MIN(TRIM(raw_title)), MIN(TRIM(raw_artist)), COUNT(*) as play_count
-		FROM scrobble_logs
-		WHERE TRIM(raw_title) != ''
-		GROUP BY LOWER(TRIM(raw_title)), LOWER(TRIM(raw_artist))
-	`
-
-	rows, err := s.db.QueryContext(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("gagal query list library tracks: %w", err)
-	}
-	defer rows.Close()
-
-	type trackAgg struct {
-		title  string
-		artist string
-		plays  int
-	}
-
-	mergedMap := make(map[string]*trackAgg)
-
-	for rows.Next() {
-		var rawTitle, rawArtist string
-		var playCount int
-		if err := rows.Scan(&rawTitle, &rawArtist, &playCount); err != nil {
-			return nil, fmt.Errorf("gagal scan baris library track: %w", err)
-		}
-
-		canonicalTitle := s.canonicalTrackTitle(rawArtist, rawTitle)
-		key := normalizeKey(rawArtist) + "\x00" + normalizeKey(canonicalTitle)
-
-		if existing, ok := mergedMap[key]; ok {
-			existing.plays += playCount
-			// Pertahankan casing dari judul kanonik
-			existing.title = canonicalTitle
-		} else {
-			mergedMap[key] = &trackAgg{
-				title:  canonicalTitle,
-				artist: rawArtist,
-				plays:  playCount,
-			}
-		}
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterasi library tracks: %w", err)
-	}
-
-	totalItems := len(mergedMap)
-	if totalItems == 0 {
-		return &model.LibraryResult{
-			Items:      []model.LibraryItem{},
-			TotalItems: 0,
-			Page:       page,
-			Limit:      limit,
-			TotalPages: 1,
-		}, nil
-	}
-
-	allItems := make([]model.LibraryItem, 0, totalItems)
-	for _, agg := range mergedMap {
-		allItems = append(allItems, model.LibraryItem{
-			Name:       agg.title,
-			Detail:     agg.artist,
-			TotalPlays: agg.plays,
-		})
-	}
-
-	// Sort alfabetis A-Z case-insensitive (selaras dengan ORDER BY COLLATE NOCASE ASC)
-	sort.Slice(allItems, func(i, j int) bool {
-		ti := strings.ToLower(allItems[i].Name)
-		tj := strings.ToLower(allItems[j].Name)
-		if ti != tj {
-			return ti < tj
-		}
-		return strings.ToLower(allItems[i].Detail) < strings.ToLower(allItems[j].Detail)
-	})
-
-	// Terapkan pagination slice
-	if offset >= totalItems {
-		return &model.LibraryResult{
-			Items:      []model.LibraryItem{},
-			TotalItems: totalItems,
-			Page:       page,
-			Limit:      limit,
-			TotalPages: calculateTotalPages(totalItems, limit),
-		}, nil
-	}
-
-	end := offset + limit
-	if end > totalItems {
-		end = totalItems
-	}
-
-	return &model.LibraryResult{
-		Items:      allItems[offset:end],
-		TotalItems: totalItems,
-		Page:       page,
-		Limit:      limit,
-		TotalPages: calculateTotalPages(totalItems, limit),
-	}, nil
 }

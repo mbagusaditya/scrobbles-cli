@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mbagusaditya/scrobbles-cli/internal/service"
+	"github.com/mbagusaditya/scrobbles-cli/internal/model"
 )
 
 var (
@@ -177,7 +177,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 		sp.stopSpinner()
 	}()
 
-	onProgress := func(p service.PageProgress) {
+	onProgress := func(p model.PageProgress) {
 		sp.stopSpinner()
 
 		fmt.Printf("[Halaman %d/%d] Diambil: %d | Tersimpan: %d | Dilewati: %d\n",
@@ -188,7 +188,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	result, err := app.scrobbleService.FetchRange(ctx, fromTime, toTime, onProgress)
+	result, err := app.scrobbleSvc.FetchRange(ctx, fromTime, toTime, onProgress)
 	sp.stopSpinner()
 
 	if err != nil {

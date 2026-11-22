@@ -2,133 +2,97 @@ package service
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
+	"github.com/mbagusaditya/scrobbles-cli/internal/lastfm"
 	"github.com/mbagusaditya/scrobbles-cli/internal/model"
+	"github.com/mbagusaditya/scrobbles-cli/internal/repository"
 )
 
-type InfoFilter struct {
-	Query  string
-	Artist string // Opsional
-	From   time.Time
-	To     time.Time
+// InfoService menggabungkan metadata publik dari Last.fm dengan statistik riwayat personal.
+type InfoService struct {
+	repo   repository.InfoRepository
+	client *lastfm.Client
+	alias  *AliasService
 }
 
-// GetArtistInfo mengambil detail artist dari DB lokal dan Last.fm API.
-func (s *ScrobbleService) GetArtistInfo(ctx context.Context, filter InfoFilter) (*model.EntityInfoResult, error) {
+func NewInfoService(repo repository.InfoRepository, client *lastfm.Client, alias *AliasService) *InfoService {
+	return &InfoService{
+		repo:   repo,
+		client: client,
+		alias:  alias,
+	}
+}
+
+// GetArtistInfo mengambil detail artist dari repository lokal dan Last.fm API.
+func (s *InfoService) GetArtistInfo(ctx context.Context, filter model.InfoFilter) (*model.EntityInfoResult, error) {
 	artistName := strings.TrimSpace(filter.Query)
 	if artistName == "" {
 		return nil, fmt.Errorf("nama artis tidak boleh kosong")
 	}
 
-	// 1. Hitung statistik personal dari DB lokal
-	stat, err := s.calcLocalStats(ctx, "raw_artist = ?", []any{artistName}, filter.From, filter.To)
+	stat, err := s.repo.GetArtistPlayStats(ctx, artistName, filter.From, filter.To)
 	if err != nil {
 		return nil, err
 	}
 
-	res := &model.EntityInfoResult{
-		Type:          "Artist",
-		Name:          artistName,
-		UserPlaycount: stat.UserPlays,
-		TotalLibrary:  stat.TotalLibrary,
-		ShareRatio:    stat.ShareRatio,
-		FirstHeard:    stat.FirstHeard,
-		LastHeard:     stat.LastHeard,
-	}
+	res := buildBaseInfoResult("Artist", artistName, "", stat)
 
-	// 2. Fetch metadata global dari Last.fm API
-	// Menggunakan method client Last.fm
-	apiResp, err := s.client.GetArtistInfo(ctx, artistName)
-	if err == nil && apiResp != nil {
-		listeners, _ := strconv.Atoi(apiResp.Artist.Stats.Listeners)
-		playcount, _ := strconv.Atoi(apiResp.Artist.Stats.Playcount)
-		res.GlobalListeners = listeners
-		res.GlobalPlaycount = playcount
-
-		for _, tag := range apiResp.Artist.Tags.Tag {
-			res.Tags = append(res.Tags, tag.Name)
-		}
-		res.BioOrSummary = cleanWikiSummary(apiResp.Artist.Bio.Summary)
+	if apiResp, err := s.client.GetArtistInfo(ctx, artistName); err == nil && apiResp != nil {
+		applyArtistAPIInfo(res, apiResp)
 	}
 
 	return res, nil
 }
 
-// GetTrackInfo mengambil detail track, otomatis menebak artis jika tidak diisi.
-func (s *ScrobbleService) GetTrackInfo(ctx context.Context, filter InfoFilter) (*model.EntityInfoResult, error) {
-	trackName := strings.TrimSpace(filter.Query)
+// GetTrackInfo mengambil detail track, mendukung resolusi alias dan deteksi artis otomatis.
+func (s *InfoService) GetTrackInfo(ctx context.Context, filter model.InfoFilter) (*model.EntityInfoResult, error) {
+	rawQuery := strings.TrimSpace(filter.Query)
 	artistName := strings.TrimSpace(filter.Artist)
 
-	if trackName == "" {
+	if rawQuery == "" {
 		return nil, fmt.Errorf("nama track tidak boleh kosong")
 	}
 
-	// Jika artis tidak diisi, coba tebak dari database lokal
+	canonicalTitle, titleVariants := s.expandTrackVariants(artistName, rawQuery)
+
 	if artistName == "" {
-		detectedArtist, err := s.resolveSingleArtistForTrack(ctx, trackName)
+		candidates, err := s.repo.FindArtistsByTrackTitles(ctx, titleVariants)
 		if err != nil {
 			return nil, err
 		}
-		artistName = detectedArtist
+		detected, err := pickSingleArtist("lagu", canonicalTitle, candidates)
+		if err != nil {
+			return nil, err
+		}
+		artistName = detected
+
+		// Perbarui varian setelah artis teridentifikasi spesifik
+		if artistName != "" {
+			canonicalTitle, titleVariants = s.expandTrackVariants(artistName, rawQuery)
+		}
 	}
 
-	var whereConditions []string
-	var args []any
-
-	whereConditions = append(whereConditions, "raw_title = ? COLLATE NOCASE")
-	args = append(args, trackName)
-
-	if artistName != "" {
-		whereConditions = append(whereConditions, "raw_artist = ? COLLATE NOCASE")
-		args = append(args, artistName)
-	}
-
-	stat, err := s.calcLocalStats(ctx, strings.Join(whereConditions, " AND "), args, filter.From, filter.To)
+	stat, err := s.repo.GetTrackPlayStats(ctx, artistName, titleVariants, filter.From, filter.To)
 	if err != nil {
 		return nil, err
 	}
 
-	res := &model.EntityInfoResult{
-		Type:          "Track",
-		Name:          trackName,
-		Artist:        artistName,
-		UserPlaycount: stat.UserPlays,
-		TotalLibrary:  stat.TotalLibrary,
-		ShareRatio:    stat.ShareRatio,
-		FirstHeard:    stat.FirstHeard,
-		LastHeard:     stat.LastHeard,
-	}
+	res := buildBaseInfoResult("Track", canonicalTitle, artistName, stat)
 
-	// Fetch metadata Last.fm jika artis berhasil diidentifikasi
 	if artistName != "" {
-		apiResp, err := s.client.GetTrackInfo(ctx, artistName, trackName)
-		if err == nil && apiResp != nil {
-			listeners, _ := strconv.Atoi(apiResp.Track.Listeners)
-			playcount, _ := strconv.Atoi(apiResp.Track.Playcount)
-			durMs, _ := strconv.Atoi(apiResp.Track.Duration)
-
-			res.GlobalListeners = listeners
-			res.GlobalPlaycount = playcount
-			res.DurationSec = durMs / 1000
-			res.Album = apiResp.Track.Album.Title
-
-			for _, tag := range apiResp.Track.TopTags.Tag {
-				res.Tags = append(res.Tags, tag.Name)
-			}
-			res.BioOrSummary = cleanWikiSummary(apiResp.Track.Wiki.Summary)
+		if apiResp, err := s.client.GetTrackInfo(ctx, artistName, canonicalTitle); err == nil && apiResp != nil {
+			applyTrackAPIInfo(res, apiResp)
 		}
 	}
 
 	return res, nil
 }
 
-// GetAlbumInfo mengambil detail album beserta tracklist/deskripsinya.
-func (s *ScrobbleService) GetAlbumInfo(ctx context.Context, filter InfoFilter) (*model.EntityInfoResult, error) {
+// GetAlbumInfo mengambil detail album beserta statistik putar personalnya.
+func (s *InfoService) GetAlbumInfo(ctx context.Context, filter model.InfoFilter) (*model.EntityInfoResult, error) {
 	albumName := strings.TrimSpace(filter.Query)
 	artistName := strings.TrimSpace(filter.Artist)
 
@@ -137,186 +101,102 @@ func (s *ScrobbleService) GetAlbumInfo(ctx context.Context, filter InfoFilter) (
 	}
 
 	if artistName == "" {
-		detectedArtist, err := s.resolveSingleArtistForAlbum(ctx, albumName)
+		candidates, err := s.repo.FindArtistsByAlbum(ctx, albumName)
 		if err != nil {
 			return nil, err
 		}
-		artistName = detectedArtist
+		detected, err := pickSingleArtist("album", albumName, candidates)
+		if err != nil {
+			return nil, err
+		}
+		artistName = detected
 	}
 
-	var whereConditions []string
-	var args []any
-
-	whereConditions = append(whereConditions, "raw_album = ? COLLATE NOCASE")
-	args = append(args, albumName)
-
-	if artistName != "" {
-		whereConditions = append(whereConditions, "raw_artist = ? COLLATE NOCASE")
-		args = append(args, artistName)
-	}
-
-	stat, err := s.calcLocalStats(ctx, strings.Join(whereConditions, " AND "), args, filter.From, filter.To)
+	stat, err := s.repo.GetAlbumPlayStats(ctx, artistName, albumName, filter.From, filter.To)
 	if err != nil {
 		return nil, err
 	}
 
-	res := &model.EntityInfoResult{
-		Type:          "Album",
-		Name:          albumName,
-		Artist:        artistName,
+	res := buildBaseInfoResult("Album", albumName, artistName, stat)
+
+	if artistName != "" {
+		if apiResp, err := s.client.GetAlbumInfo(ctx, artistName, albumName); err == nil && apiResp != nil {
+			applyAlbumAPIInfo(res, apiResp)
+		}
+	}
+
+	return res, nil
+}
+
+func (s *InfoService) expandTrackVariants(artist, title string) (string, []string) {
+	if s.alias != nil {
+		return s.alias.ExpandTrackTitles(artist, title)
+	}
+	clean := strings.TrimSpace(title)
+	return clean, []string{clean}
+}
+
+func pickSingleArtist(entityLabel, entityName string, candidates []string) (string, error) {
+	if len(candidates) == 0 {
+		return "", nil
+	}
+	if len(candidates) > 1 {
+		return "", fmt.Errorf("ditemukan %d artis berbeda untuk %s %q (%s). Mohon spesifikasikan artis dengan flag --artist",
+			len(candidates), entityLabel, entityName, strings.Join(candidates, ", "))
+	}
+	return candidates[0], nil
+}
+
+func buildBaseInfoResult(entityType, name, artist string, stat *repository.EntityPlayStats) *model.EntityInfoResult {
+	var shareRatio float64
+	if stat.TotalLibrary > 0 {
+		shareRatio = (float64(stat.UserPlays) / float64(stat.TotalLibrary)) * 100.0
+	}
+
+	return &model.EntityInfoResult{
+		Type:          entityType,
+		Name:          name,
+		Artist:        artist,
 		UserPlaycount: stat.UserPlays,
 		TotalLibrary:  stat.TotalLibrary,
-		ShareRatio:    stat.ShareRatio,
+		ShareRatio:    shareRatio,
 		FirstHeard:    stat.FirstHeard,
 		LastHeard:     stat.LastHeard,
 	}
-
-	if artistName != "" {
-		apiResp, err := s.client.GetAlbumInfo(ctx, artistName, albumName)
-		if err == nil && apiResp != nil {
-			listeners, _ := strconv.Atoi(apiResp.Album.Listeners)
-			playcount, _ := strconv.Atoi(apiResp.Album.Playcount)
-			res.GlobalListeners = listeners
-			res.GlobalPlaycount = playcount
-
-			for _, tag := range apiResp.Album.Tags.Tag {
-				res.Tags = append(res.Tags, tag.Name)
-			}
-			res.BioOrSummary = cleanWikiSummary(apiResp.Album.Wiki.Summary)
-		}
-	}
-
-	return res, nil
 }
 
-// Helper: Menghitung playcount entitas dan perbandingannya dengan total scrobble lokal
-type localStat struct {
-	UserPlays    int
-	TotalLibrary int
-	ShareRatio   float64
-	FirstHeard   time.Time
-	LastHeard    time.Time
+func applyArtistAPIInfo(res *model.EntityInfoResult, apiResp *lastfm.ArtistInfoResponse) {
+	res.GlobalListeners, _ = strconv.Atoi(apiResp.Artist.Stats.Listeners)
+	res.GlobalPlaycount, _ = strconv.Atoi(apiResp.Artist.Stats.Playcount)
+	for _, tag := range apiResp.Artist.Tags.Tag {
+		res.Tags = append(res.Tags, tag.Name)
+	}
+	res.BioOrSummary = cleanWikiSummary(apiResp.Artist.Bio.Summary)
 }
 
-func (s *ScrobbleService) calcLocalStats(ctx context.Context, entityClause string, args []any, from, to time.Time) (*localStat, error) {
-	// Query total scrobble di pustaka pada rentang tanggal yang sama
-	var timeConds []string
-	var timeArgs []any
+func applyTrackAPIInfo(res *model.EntityInfoResult, apiResp *lastfm.TrackInfoResponse) {
+	res.GlobalListeners, _ = strconv.Atoi(apiResp.Track.Listeners)
+	res.GlobalPlaycount, _ = strconv.Atoi(apiResp.Track.Playcount)
+	durMs, _ := strconv.Atoi(apiResp.Track.Duration)
+	res.DurationSec = durMs / 1000
+	res.Album = apiResp.Track.Album.Title
 
-	if !from.IsZero() {
-		timeConds = append(timeConds, "played_at >= ?")
-		timeArgs = append(timeArgs, from.Unix())
+	for _, tag := range apiResp.Track.TopTags.Tag {
+		res.Tags = append(res.Tags, tag.Name)
 	}
-	if !to.IsZero() {
-		timeConds = append(timeConds, "played_at <= ?")
-		timeArgs = append(timeArgs, to.Unix())
-	}
-
-	totalWhere := ""
-	if len(timeConds) > 0 {
-		totalWhere = "WHERE " + strings.Join(timeConds, " AND ")
-	}
-
-	var totalLib int
-	countLibQuery := fmt.Sprintf("SELECT COUNT(*) FROM scrobble_logs %s", totalWhere)
-	if err := s.db.QueryRowContext(ctx, countLibQuery, timeArgs...).Scan(&totalLib); err != nil {
-		return nil, fmt.Errorf("gagal menghitung total scrobbles pustaka: %w", err)
-	}
-
-	// Query data spesifik entitas
-	fullWhere := "WHERE " + entityClause
-	fullArgs := append([]any{}, args...)
-	if len(timeConds) > 0 {
-		fullWhere += " AND " + strings.Join(timeConds, " AND ")
-		fullArgs = append(fullArgs, timeArgs...)
-	}
-
-	query := fmt.Sprintf(`
-		SELECT COUNT(*), MIN(played_at), MAX(played_at)
-		FROM scrobble_logs
-		%s
-	`, fullWhere)
-
-	var userPlays int
-	var minPlayed, maxPlayed sql.NullInt64
-	if err := s.db.QueryRowContext(ctx, query, fullArgs...).Scan(&userPlays, &minPlayed, &maxPlayed); err != nil {
-		return nil, fmt.Errorf("gagal query statistik entitas: %w", err)
-	}
-
-	res := &localStat{
-		UserPlays:    userPlays,
-		TotalLibrary: totalLib,
-	}
-
-	if totalLib > 0 {
-		res.ShareRatio = (float64(userPlays) / float64(totalLib)) * 100.0
-	}
-
-	if minPlayed.Valid {
-		res.FirstHeard = time.Unix(minPlayed.Int64, 0).Local()
-	}
-	if maxPlayed.Valid {
-		res.LastHeard = time.Unix(maxPlayed.Int64, 0).Local()
-	}
-
-	return res, nil
+	res.BioOrSummary = cleanWikiSummary(apiResp.Track.Wiki.Summary)
 }
 
-// resolveSingleArtistForTrack mendeteksi artis jika tidak diisi user
-func (s *ScrobbleService) resolveSingleArtistForTrack(ctx context.Context, title string) (string, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT DISTINCT raw_artist FROM scrobble_logs WHERE raw_title = ? COLLATE NOCASE", title)
-	if err != nil {
-		return "", err
+func applyAlbumAPIInfo(res *model.EntityInfoResult, apiResp *lastfm.AlbumInfoResponse) {
+	res.GlobalListeners, _ = strconv.Atoi(apiResp.Album.Listeners)
+	res.GlobalPlaycount, _ = strconv.Atoi(apiResp.Album.Playcount)
+	for _, tag := range apiResp.Album.Tags.Tag {
+		res.Tags = append(res.Tags, tag.Name)
 	}
-	defer rows.Close()
-
-	var artists []string
-	for rows.Next() {
-		var a string
-		if err := rows.Scan(&a); err == nil {
-			artists = append(artists, a)
-		}
-	}
-
-	if len(artists) == 0 {
-		return "", nil // Tidak ditemukan di DB lokal, biarkan pencarian Last.fm mencari apa adanya
-	}
-	if len(artists) > 1 {
-		return "", fmt.Errorf("ditemukan %d artis berbeda untuk lagu %q (%s). Mohon spesifikasikan artis dengan flag --artist",
-			len(artists), title, strings.Join(artists, ", "))
-	}
-
-	return artists[0], nil
-}
-
-// resolveSingleArtistForAlbum mendeteksi artis album jika tidak diisi user
-func (s *ScrobbleService) resolveSingleArtistForAlbum(ctx context.Context, album string) (string, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT DISTINCT raw_artist FROM scrobble_logs WHERE raw_album = ? COLLATE NOCASE", album)
-	if err != nil {
-		return "", err
-	}
-	defer rows.Close()
-
-	var artists []string
-	for rows.Next() {
-		var a string
-		if err := rows.Scan(&a); err == nil {
-			artists = append(artists, a)
-		}
-	}
-
-	if len(artists) == 0 {
-		return "", nil
-	}
-	if len(artists) > 1 {
-		return "", fmt.Errorf("ditemukan %d artis berbeda untuk album %q. Mohon spesifikasikan artis dengan flag --artist", len(artists), album)
-	}
-
-	return artists[0], nil
+	res.BioOrSummary = cleanWikiSummary(apiResp.Album.Wiki.Summary)
 }
 
 func cleanWikiSummary(summary string) string {
-	// Menghapus tag tautan Last.fm default '<a href="...">Read more on Last.fm</a>'
 	if idx := strings.Index(summary, "<a href"); idx != -1 {
 		summary = summary[:idx]
 	}

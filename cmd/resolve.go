@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mbagusaditya/scrobbles-cli/internal/service"
+	"github.com/mbagusaditya/scrobbles-cli/internal/model"
 )
 
 var (
@@ -35,13 +35,13 @@ func runResolve(cmd *cobra.Command, args []string) error {
 	fmt.Println("Memeriksa scrobble logs yang belum terhubung (unlinked)...")
 
 	batchIndex := 1
-	onProgress := func(p service.ResolveProgress) {
+	onProgress := func(p model.ResolveProgress) {
 		fmt.Printf("[Batch %d] Menautkan %d log (Artis Baru: +%d, Trek Baru: +%d) | Sisa log: %d\n",
 			batchIndex, p.UpdatedLogs, p.NewArtists, p.NewTracks, p.Remaining)
 		batchIndex++
 	}
 
-	res, err := app.scrobbleService.ResolveUnlinkedScrobbles(ctx, resolveBatchSize, onProgress)
+	res, err := app.resolverSvc.ResolveUnlinkedScrobbles(ctx, resolveBatchSize, onProgress)
 	if err != nil {
 		return humanizeError(err)
 	}
@@ -57,7 +57,7 @@ func runResolve(cmd *cobra.Command, args []string) error {
 
 	if resolveDurations {
 		fmt.Println("\nMengambil metadata durasi lagu aktual dari Last.fm...")
-		onDurProgress := func(p service.DurationProgress) {
+		onDurProgress := func(p model.DurationProgress) {
 			if p.Found {
 				sec := p.DurationMs / 1000
 				fmt.Printf("[%d/%d] ✓ %s - %s (%d:%02d)\n", p.Current, p.Total, p.Artist, p.Title, sec/60, sec%60)
@@ -66,7 +66,7 @@ func runResolve(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		durRes, err := app.scrobbleService.SyncTrackDurations(ctx, onDurProgress)
+		durRes, err := app.resolverSvc.SyncTrackDurations(ctx, onDurProgress)
 		if err != nil {
 			return humanizeError(err)
 		}

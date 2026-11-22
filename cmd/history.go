@@ -92,7 +92,7 @@ func runHistory(cmd *cobra.Command, args []string) error {
 	}
 
 	// 5. Ambil data menggunakan ListScrobbles yang sudah ada di scrobbleService
-	scrobbles, err := app.scrobbleService.ListScrobbles(ctx, filter)
+	scrobbles, err := app.scrobbleSvc.ListScrobbles(ctx, filter)
 	if err != nil {
 		return humanizeError(err)
 	}

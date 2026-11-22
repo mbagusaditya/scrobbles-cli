@@ -31,3 +31,29 @@ func NewScrobble(rawTitle, rawArtist, rawAlbum string, playedAt time.Time) *Scro
 		CreatedAt: time.Now(),
 	}
 }
+
+// ScrobbleListFilter menampung parameter filter dan paginasi untuk daftar log scrobble.
+type ScrobbleListFilter struct {
+	Artist string
+	Album  string
+	From   time.Time
+	To     time.Time
+	Limit  int
+	Offset int
+}
+
+// SyncResult merangkum hasil keseluruhan proses sinkronisasi dari Last.fm.
+type SyncResult struct {
+	Inserted int
+	Skipped  int
+	Fetched  int
+}
+
+// PageProgress melaporkan progres pengambilan per halaman dari API Last.fm.
+type PageProgress struct {
+	Page       int
+	TotalPages int
+	Fetched    int
+	Inserted   int
+	Skipped    int
+}

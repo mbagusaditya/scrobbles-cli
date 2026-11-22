@@ -24,8 +24,8 @@ var aliasListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "Menampilkan daftar aturan alias yang aktif",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		aliases := app.aliasService.ListTrackAliases()
-		fmt.Printf("File konfigurasi: %s\n\n", app.aliasService.ConfigPath())
+		aliases := app.aliasSvc.ListTrackAliases()
+		fmt.Printf("File konfigurasi: %s\n\n", app.aliasSvc.ConfigPath())
 
 		if len(aliases) == 0 {
 			fmt.Println("Belum ada aturan alias yang terdaftar.")
@@ -45,7 +45,7 @@ var aliasAddCmd = &cobra.Command{
 	Short:   "Menambahkan aturan alias judul lagu baru",
 	Example: `  scrobbles alias add -a "MyGO!!!!!" --from "孤壊牢 - KOKORO" --to "孤壊牢"`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := app.aliasService.AddTrackAlias(aliasArtist, aliasFrom, aliasTo); err != nil {
+		if err := app.aliasSvc.AddTrackAlias(aliasArtist, aliasFrom, aliasTo); err != nil {
 			return humanizeError(err)
 		}
 
@@ -65,7 +65,7 @@ var aliasRemoveCmd = &cobra.Command{
 			return fmt.Errorf("nomor indeks harus berupa angka: %w", err)
 		}
 
-		removed, err := app.aliasService.RemoveTrackAlias(idx)
+		removed, err := app.aliasSvc.RemoveTrackAlias(idx)
 		if err != nil {
 			return humanizeError(err)
 		}

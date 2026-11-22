@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mbagusaditya/scrobbles-cli/internal/service"
+	"github.com/mbagusaditya/scrobbles-cli/internal/model"
 )
 
 var (
@@ -126,12 +126,12 @@ func runStats(cmd *cobra.Command, args []string) error {
 	}
 
 	// 3. Panggil query statistik via service
-	filter := service.StatsFilter{
+	filter := model.StatsFilter{
 		From: fromTime,
 		To:   toTime,
 	}
 
-	stats, err := app.scrobbleService.GetStats(ctx, filter)
+	stats, err := app.statsSvc.GetStats(ctx, filter)
 	if err != nil {
 		return humanizeError(err)
 	}

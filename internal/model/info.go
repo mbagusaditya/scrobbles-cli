@@ -25,3 +25,11 @@ type EntityInfoResult struct {
 	FirstHeard    time.Time
 	LastHeard     time.Time
 }
+
+// InfoFilter menampung parameter pencarian metadata dan riwayat personal entitas.
+type InfoFilter struct {
+	Query  string
+	Artist string // Opsional untuk disambiguasi track/album
+	From   time.Time
+	To     time.Time
+}

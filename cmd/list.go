@@ -88,11 +88,11 @@ func runLibraryList(cmd *cobra.Command, targetType string) error {
 
 	switch targetType {
 	case "Artist":
-		result, err = app.scrobbleService.ListLibraryArtists(ctx, filter)
+		result, err = app.librarySvc.ListLibraryArtists(ctx, filter)
 	case "Album":
-		result, err = app.scrobbleService.ListLibraryAlbums(ctx, filter)
+		result, err = app.librarySvc.ListLibraryAlbums(ctx, filter)
 	case "Track":
-		result, err = app.scrobbleService.ListLibraryTracks(ctx, filter)
+		result, err = app.librarySvc.ListLibraryTracks(ctx, filter)
 	}
 
 	if err != nil {

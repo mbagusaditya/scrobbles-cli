@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mbagusaditya/scrobbles-cli/internal/model"
-	"github.com/mbagusaditya/scrobbles-cli/internal/service"
 )
 
 var (
@@ -65,7 +64,7 @@ func init() {
 func runInfo(cmd *cobra.Command, targetType, query string) error {
 	ctx := cmd.Context()
 
-	// 1. Parsing filter tanggal
+	// 1. Parsing & validasi filter tanggal terlebih dahulu sebelum menyentuh DB
 	var fromTime, toTime time.Time
 	periodLabel := "All Time"
 
@@ -96,24 +95,27 @@ func runInfo(cmd *cobra.Command, targetType, query string) error {
 		periodLabel = fmt.Sprintf("Hingga %s", toTime.Format("2006-01-02"))
 	}
 
-	filter := service.InfoFilter{
+	filter := model.InfoFilter{
 		Query:  query,
 		Artist: infoArtist,
 		From:   fromTime,
 		To:     toTime,
 	}
 
-	// 2. Eksekusi query service
-	var res *model.EntityInfoResult
-	var err error
+	// 2. Lazy init InfoService (koneksi DB baru dibuka di titik ini)
+	infoSvc, err := app.InfoService()
+	if err != nil {
+		return humanizeError(err)
+	}
 
+	var res *model.EntityInfoResult
 	switch targetType {
 	case "Artist":
-		res, err = app.scrobbleService.GetArtistInfo(ctx, filter)
+		res, err = infoSvc.GetArtistInfo(ctx, filter)
 	case "Album":
-		res, err = app.scrobbleService.GetAlbumInfo(ctx, filter)
+		res, err = infoSvc.GetAlbumInfo(ctx, filter)
 	case "Track":
-		res, err = app.scrobbleService.GetTrackInfo(ctx, filter)
+		res, err = infoSvc.GetTrackInfo(ctx, filter)
 	}
 
 	if err != nil {

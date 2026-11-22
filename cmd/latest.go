@@ -6,7 +6,7 @@ import (
 	"github.com/mattn/go-runewidth"
 	"github.com/spf13/cobra"
 
-	"github.com/mbagusaditya/scrobbles-cli/internal/service"
+	"github.com/mbagusaditya/scrobbles-cli/internal/model"
 )
 
 var latestLimit int
@@ -61,16 +61,16 @@ func init() {
 func runLatest(cmd *cobra.Command, targetType string) error {
 	ctx := cmd.Context()
 
-	var items []service.LatestItem
+	var items []model.LatestItem
 	var err error
 
 	switch targetType {
 	case "Artist":
-		items, err = app.scrobbleService.GetLatestArtists(ctx, latestLimit)
+		items, err = app.latestSvc.GetLatestArtists(ctx, latestLimit)
 	case "Album":
-		items, err = app.scrobbleService.GetLatestAlbums(ctx, latestLimit)
+		items, err = app.latestSvc.GetLatestAlbums(ctx, latestLimit)
 	case "Track":
-		items, err = app.scrobbleService.GetLatestTracks(ctx, latestLimit)
+		items, err = app.latestSvc.GetLatestTracks(ctx, latestLimit)
 	}
 
 	if err != nil {

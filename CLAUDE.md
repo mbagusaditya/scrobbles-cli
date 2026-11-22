@@ -1,95 +1,138 @@
-# Project: Scrobbles CLI (Go + Turso)
+# Project Architecture & Engineering Guidelines
 
-## Konteks
+## Project Overview
 
-CLI untuk manajemen data personal (scrobble musik Last.fm, dll) yang berbagi database **Turso/SQLite** dengan web app (Drizzle ORM).
-CLI Go ini bertindak sebagai **data ingestion, background synchronization, metadata enrichment, dan maintenance engine** untuk domain musik/scrobble Last.fm.
+`scrobbles-cli` is a Go CLI application for syncing, normalizing,
+enriching, and analyzing personal Last.fm listening history backed by
+Turso (libSQL) or local SQLite.
 
-## Tech Stack
+- **Module:** `github.com/mbagusaditya/scrobbles-cli`
+- **Language:** Go (Cobra CLI framework)
+- **Database Engine:** Turso (libSQL) / SQLite via standard
+  `database/sql` (`*sql.DB`)
 
-- **Bahasa**: Go 1.25
-- **Database**: Turso (libSQL), driver native `tursodatabase/libsql-client-go` (pure Go, no CGO)
-- **CLI Framework**: `spf13/cobra`
-- **Config**: `.env` & XDG Base Directory (`~/.config/scrobbles/config.env`, `~/.config/scrobbles/aliases.json`) via `joho/godotenv`
-- **UUID**: `google/uuid` (UUID v4 string 36 karakter, konsisten dengan `crypto.randomUUID()` di Drizzle)
+## Core Architecture & Request Flow
 
-## Module: `github.com/mbagusaditya/scrobbles-cli`
+Every command follows a strict unidirectional dependency chain:
 
-## Schema Relevan (Drizzle ORM Web — Read-Only Reference)
+```text
+user ──► cmd/root.go ──► specific cmd/*.go ──► App (Lazy DI) ──► service ──► repository ──► *sql.DB / JSON
+```
 
-- `artists`: `id (UUID PK)`, `name (TEXT UNIQUE)`, `mbid`, `imageUrl`, `createdAt`
-- `tracks`: `id (UUID PK)`, `artistId (FK → artists)`, `title`, `albumName`, `durationMs`, `coverUrl`, `createdAt`
-    - Unique Constraint: `(artistId, title, albumName)`
-- `scrobble_logs`: `id (UUID PK)`, `trackId (FK nullable → tracks)`, `rawTitle`, `rawArtist`, `rawAlbum`, `playedAt (Unix Epoch Seconds)`, `createdAt`
-    - Unique Index: `(rawArtist, rawTitle, playedAt)`
-    - **Partial Indexes**:
-        - `idx_scrobble_logs_unresolved`: `(rawArtist, rawTitle) WHERE trackId IS NULL` (optimasi resolver)
-        - `idx_scrobble_logs_valid_albums`: `(rawAlbum) WHERE rawAlbum IS NOT NULL AND rawAlbum != ''` (optimasi distinct album stats)
-
-**Catatan Timestamp**: SQLite Turso menyimpan waktu sebagai Unix Epoch integer (detik). Di Go, konversi manual menggunakan `.Unix()` saat write dan `time.Unix()` saat read.
-
-## Arsitektur (4 Layer)
+### Directory Structure
 
 ```text
 scrobbles-cli/
-├── .env.example
-├── go.mod
-├── main.go
+├── main.go                       # Entry point calling cmd.Execute()
 ├── cmd/
-│   ├── root.go              → wiring dependency (config → alias → db → lastfm → service)
-│   ├── sync.go              → subcommand sync (--range latest|day|week, --from, --to)
-│   ├── list.go              → subcommand list log scrobble & master library (track/artist/album)
-│   ├── top.go               → subcommand ranking top tracks, artists, & albums
-│   ├── info.go              → subcommand detail metadata & riwayat personal track/artist/album
-│   ├── stats.go             → subcommand agregasi stats (durasi aktual, preset --day/week/month/year, custom range)
-│   ├── alias.go             → subcommand pengelolaan mapping alias judul lagu lokal (aliases.json)
-│   ├── resolve.go           → subcommand normalisasi master artists/tracks & sync durasi (--durations)
-│   └── version.go           → subcommand informasi binary, commit, & build date via ldflags
+│   ├── app.go                    # Lazy DI Container (App struct) caching DB, clients, & services
+│   ├── root.go                   # Root Cobra command & PersistentPostRunE cleanup (app.Close())
+│   ├── alias.go                  # Track title normalization rules (JSON-backed, zero DB)
+│   ├── info.go                   # Entity metadata (Last.fm) + personal play stats
+│   ├── latest.go                 # Most recently played artists, albums, and tracks
+│   ├── list.go                   # Raw scrobble logs & master catalog (artists/albums/tracks)
+│   ├── resolve.go                # Entity linking (scrobble_logs -> artists/tracks) & duration sync
+│   ├── stats.go                  # Listening summary, duration totals, peak day/hour, repeat ratio
+│   ├── sync.go                   # Incremental & custom date-range scrobble ingestion from Last.fm
+│   ├── top.go                    # Top tracks, artists, and albums leaderboard
+│   └── version.go                # CLI version info
 └── internal/
-    ├── config/
-    │   ├── config.go        → resolusi & validasi environment variables (.env / XDG config.env)
-    │   └── alias.go         → persistensi JSON & resolusi path aliases.json (CWD / XDG)
-    ├── model/               → entity murni tanpa DB logic (Artist, Track, Scrobble, Alias, Top, Library, Info)
-    ├── lastfm/              → HTTP client (getRecentTracks, track/artist/album.getInfo), rate throttle, retry backoff
-    ├── db/db.go             → koneksi database Turso murni
-    └── service/
-        ├── alias_service.go     → lookup in-memory O(1), validasi siklus, & resolusi judul kanonik
-        ├── scrobble_service.go  → ingestion, fetch pagination, insert ignore, list logs
-        ├── library_service.go   → daftar master unik artists, tracks (alias-aware), & albums
-        ├── top_service.go       → kalkulasi peringkat top tracks (alias-aware), artists, & albums
-        ├── info_service.go      → gabungan metadata Last.fm API + statistik personal DB
-        ├── stat_service.go      → kalkulasi metrik, hari inklusif, & akumulasi durasi aktual (fallback 3.5m)
-        └── resolver_service.go  → batch linking unlinked logs -> master tables & sync duration_ms
+    ├── config/                   # Environment/config file loading & alias path resolution
+    ├── db/                       # Database connection factory (*sql.DB for Turso / SQLite)
+    ├── lastfm/                   # Last.fm HTTP API client & response DTOs
+    ├── model/                    # Pure domain models, filters, and result DTOs (zero DB/HTTP deps)
+    │   ├── alias.go
+    │   ├── info.go
+    │   ├── latest.go
+    │   ├── library.go
+    │   ├── resolver.go
+    │   ├── scrobble.go
+    │   ├── scrobble_sync.go
+    │   ├── stats.go
+    │   └── top.go
+    ├── repository/               # Unified persistence layer (interfaces + *sql.DB / JSON impls)
+    │   ├── alias_repository.go   # JSON file persistence for track aliases
+    │   ├── info_repository.go    # Conditional CASE WHEN entity & library stats
+    │   ├── latest_repository.go  # Latest played aggregations
+    │   ├── library_repository.go # Paginated unique catalog queries
+    │   ├── resolver_repository.go# Batch transactional entity linking
+    │   ├── scrobble_repository.go# Raw scrobble insertion & filtered listing
+    │   ├── stats_repository.go   # O(1) memory streaming row projection
+    │   ├── top_repository.go     # Ranked aggregation queries
+    │   └── track_repository.go   # Master tracks metadata & duration_ms persistence
+    └── service/                  # Business logic, alias merging, & external API orchestration
+        ├── alias_service.go
+        ├── info_service.go
+        ├── latest_service.go
+        ├── library_service.go
+        ├── resolver_service.go
+        ├── scrobble_service.go
+        ├── stats_service.go
+        └── top_service.go
 ```
 
-**Prinsip pembagian layer**:
+## Architectural Conventions & Design Rules
 
-- `model` = entity murni, tidak tahu DB/API
-- `lastfm` = HTTP client + build URL, tidak ada business logic
-- `db` = cuma koneksi, tidak ada query
-- `service` = semua business logic (mapping, orkestrasi, query SQL)
-- `cmd` = parsing flag, orkestrasi command, printing ke terminal
+### 1. Unified `internal/repository/` Package
 
-## Keputusan Desain Kunci
+- **Do NOT** split repositories into driver sub-packages
+  (`repository/sqlite`, `repository/turso`).
+- Both local SQLite and Turso share the exact same SQLite SQL dialect
+  and `database/sql` interface.
+- Connection routing (`file:...` vs `libsql://...`) is handled
+  exclusively inside `internal/db`. Every SQL repository accepts
+  `*sql.DB` via its `New<Domain>Repository(db *sql.DB)` constructor.
 
-| Area                           | Keputusan                                                                                                                                                                    |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Resolusi Konfigurasi (XDG)     | Prioritas 1: file di CWD (`.env`, `aliases.json`). Prioritas 2: XDG Base Directory (`~/.config/scrobbles/config.env`, `~/.config/scrobbles/aliases.json`).                   |
-| Track Title Alias Mapping      | **Read-time in-memory** via `AliasService` (`aliases.json`). Mendukung pemetaan _many-to-one_ & _transitive_ tanpa memodifikasi data mentah di database Turso.               |
-| Kalkulasi Durasi Listening     | Menggunakan `tracks.duration_ms` aktual (diisi via `resolve --durations` dari `track.getInfo`), dengan fallback `210.000 ms` (3,5 menit) jika `duration_ms` belum tersedia.  |
-| Kalkulasi Hari Kalender        | Menggunakan titik tengah hari (`12:00:00` lokal) secara inklusif agar kebal terhadap selisih jam/menit antar batas `played_at`.                                              |
-| Resolver & Duration Enrichment | **Aktif (Batch 500)** — Memanfaatkan partial index `WHERE track_id IS NULL` untuk linking, serta `SyncTrackDurations` (rate-limit 300ms) untuk mengisi `tracks.duration_ms`. |
-| Dedup insert                   | `INSERT OR IGNORE` memanfaatkan unique index yang sudah ada di schema                                                                                                        |
-| Retry API                      | Exponential backoff (500ms, 1s, 2s, 4s...), retry hanya untuk network error/429/5xx, max 4x retry                                                                            |
-| Timeout                        | Per-request saja (15 detik di `http.Client`), tidak ada timeout keseluruhan command                                                                                          |
-| Custom range                   | Maksimal 7 hari (`service.MaxCustomRangeDays`), divalidasi & ditolak keras di `cmd` kalau lebih                                                                              |
-| Album kosong dari API          | Disimpan sebagai `NULL` (bukan string kosong)                                                                                                                                |
-| Now-playing track dari API     | Di-skip saat sync (belum final scrobble, belum ada timestamp)                                                                                                                |
-| Relasi antar entity di Go      | Tidak pakai nested struct/pointer ala ORM — cuma foreign key ID; kalau butuh JOIN, buat struct baru khusus untuk hasil query itu                                             |
+### 2. Lazy Dependency Injection (`cmd/app.go`)
 
-## Library yang Dipakai (go.mod)
+- `cmd/root.go` must **never** open a database connection in
+  `PersistentPreRunE`.
+- Lightweight commands (`version`, `help`, `alias`) must execute
+  without triggering `db.Connect`.
+- Each subcommand validates CLI flags first, then retrieves its
+  required service via `app.<Domain>Service()`.
+- `App.Close()` is called once in `rootCmd.PersistentPostRunE` and
+  safely closes `*sql.DB` only if it was initialized.
 
-- `github.com/spf13/cobra` v1.10.2
-- `github.com/tursodatabase/libsql-client-go` (native driver)
-- `github.com/joho/godotenv` v1.5.1
-- `github.com/google/uuid` v1.6.0
+### 3. Track Title Canonicalization (`AliasService`)
+
+- Track title aliases are stored locally in `aliases.json`
+  (`AliasRepository`) and indexed in-memory with multi-hop cycle
+  protection (`maxAliasResolutionHops = 5`).
+- Any domain aggregating or querying tracks (`ScrobbleService`,
+  `TopService`, `LibraryService`, `LatestService`, `InfoService`,
+  `StatsService`, `ResolverService`) must normalize track titles
+  through `AliasService.ResolveTrackTitle(artist, title)` (or
+  `ExpandTrackTitles` for multi-variant lookup).
+- For track rankings/lists (`TopTracks`, `ListLibraryTracks`,
+  `GetLatestTracks`), raw `(artist, title)` counts/timestamps are
+  fetched unpaginated from SQL, merged by canonical key in Go, sorted,
+  and sliced in memory so alias variants never split across separate
+  entries.
+
+### 4. Query & Memory Discipline
+
+- **No N+1 Queries in Batches:**
+  `ResolverRepository.LinkUnresolvedBatch` preloads existing `artists`
+  and `tracks` into Go maps within the transaction (`2 SELECT`s total)
+  and uses comparable Go structs (`trackLookupKey`) as map keys
+  instead of string-concatenated composite keys.
+- **Single-Roundtrip Conditional Stats:** `InfoRepository` computes
+  total library scrobbles alongside entity play counts,
+  `MIN(played_at)`, and `MAX(played_at)` in a single `CASE WHEN` query
+  to minimize Turso network latency.
+- **Streaming Stats Aggregation:**
+  `StatsRepository.StreamScrobbleRows` streams rows via callback
+  rather than loading all `scrobble_logs` into a slice, keeping memory
+  usage constant.
+
+### 5. Naming & Layer Boundaries
+
+- **Models (`internal/model`):** Input filters (`*Filter`) and output
+  DTOs (`*Result`, `*Item`) live in `internal/model`, never in
+  `internal/service`.
+- **Services (`internal/service`):** Zero raw SQL strings or
+  `database/sql` imports allowed inside `internal/service`.
+- **Plurality:** Use `stats` (plural) consistently across
+  `StatsRepository`, `StatsService`, `stats_repository.go`,
+  `stats_service.go`, and `cmd/stats.go`.
