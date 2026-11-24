@@ -11,9 +11,10 @@ var app = NewApp()
 
 var rootCmd = &cobra.Command{
 	Use:   "scrobbles",
-	Short: "CLI untuk mengurus data scrobble Last.fm kamu",
-	Long: `scrobbles adalah CLI untuk sinkronisasi dan mengelola riwayat
-scrobble musik dari Last.fm ke database Turso kamu sendiri.`,
+	Short: "CLI local-first untuk mengelola riwayat scrobble Last.fm",
+	Long: `scrobbles adalah CLI local-first untuk sinkronisasi, analisis, dan pengelolaan
+riwayat scrobble musik dari Last.fm ke database SQLite lokal dengan dukungan
+sinkronisasi cadangan ke Turso Cloud melalui perintah 'scrobbles db'.`,
 	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
 		return app.Close()
 	},

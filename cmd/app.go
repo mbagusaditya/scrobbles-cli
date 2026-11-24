@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/mbagusaditya/scrobbles-cli/internal/config"
@@ -11,15 +12,14 @@ import (
 	"github.com/mbagusaditya/scrobbles-cli/internal/service"
 )
 
-// App adalah Lazy Dependency Injection Container untuk subcommand CLI.
-// Resource seperti konfigurasi, koneksi database, client Last.fm, repository,
-// dan service hanya diinisialisasi saat method getter-nya pertama kali dipanggil.
 type App struct {
-	cfg    *config.Config
-	db     *sql.DB
-	client *lastfm.Client
+	cfg      *config.Config
+	db       *sql.DB
+	remoteDB *sql.DB
+	client   *lastfm.Client
 
 	aliasSvc    *service.AliasService
+	replicaSvc  *service.ReplicaService
 	scrobbleSvc *service.ScrobbleService
 	infoSvc     *service.InfoService
 	latestSvc   *service.LatestService
@@ -29,12 +29,10 @@ type App struct {
 	topSvc      *service.TopService
 }
 
-// NewApp membuat instance App kosong tanpa membuka koneksi database atau memuat file config.
 func NewApp() *App {
 	return &App{}
 }
 
-// Config memuat konfigurasi aplikasi sekali dan menyimpannya di cache.
 func (a *App) Config() (*config.Config, error) {
 	if a.cfg != nil {
 		return a.cfg, nil
@@ -49,7 +47,7 @@ func (a *App) Config() (*config.Config, error) {
 	return a.cfg, nil
 }
 
-// DB membuka koneksi database (*sql.DB) secara lazy hanya ketika dibutuhkan.
+// DB membuka koneksi database SQLite lokal secara lazy.
 func (a *App) DB() (*sql.DB, error) {
 	if a.db != nil {
 		return a.db, nil
@@ -60,16 +58,35 @@ func (a *App) DB() (*sql.DB, error) {
 		return nil, err
 	}
 
-	database, err := db.Connect(cfg)
+	database, err := db.OpenLocal(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("gagal konek ke database: %w", err)
+		return nil, fmt.Errorf("gagal membuka database lokal: %w", err)
 	}
 
 	a.db = database
 	return a.db, nil
 }
 
-// LastfmClient membuat instance API client Last.fm secara lazy berdasarkan konfigurasi.
+// RemoteDB membuka koneksi database Turso Cloud secara lazy (khusus untuk `scrobbles db`).
+func (a *App) RemoteDB() (*sql.DB, error) {
+	if a.remoteDB != nil {
+		return a.remoteDB, nil
+	}
+
+	cfg, err := a.Config()
+	if err != nil {
+		return nil, err
+	}
+
+	database, err := db.OpenRemote(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	a.remoteDB = database
+	return a.remoteDB, nil
+}
+
 func (a *App) LastfmClient() (*lastfm.Client, error) {
 	if a.client != nil {
 		return a.client, nil
@@ -84,7 +101,6 @@ func (a *App) LastfmClient() (*lastfm.Client, error) {
 	return a.client, nil
 }
 
-// AliasService memuat aliases.json secara lazy tanpa memicu koneksi database.
 func (a *App) AliasService() (*service.AliasService, error) {
 	if a.aliasSvc != nil {
 		return a.aliasSvc, nil
@@ -104,7 +120,27 @@ func (a *App) AliasService() (*service.AliasService, error) {
 	return a.aliasSvc, nil
 }
 
-// ScrobbleService merakit ScrobbleRepository -> ScrobbleService secara lazy.
+func (a *App) ReplicaService() (*service.ReplicaService, error) {
+	if a.replicaSvc != nil {
+		return a.replicaSvc, nil
+	}
+
+	localDB, err := a.DB()
+	if err != nil {
+		return nil, err
+	}
+
+	remoteDB, err := a.RemoteDB()
+	if err != nil {
+		return nil, err
+	}
+
+	localRepo := repository.NewReplicaRepository(localDB)
+	remoteRepo := repository.NewReplicaRepository(remoteDB)
+	a.replicaSvc = service.NewReplicaService(localRepo, remoteRepo)
+	return a.replicaSvc, nil
+}
+
 func (a *App) ScrobbleService() (*service.ScrobbleService, error) {
 	if a.scrobbleSvc != nil {
 		return a.scrobbleSvc, nil
@@ -130,7 +166,6 @@ func (a *App) ScrobbleService() (*service.ScrobbleService, error) {
 	return a.scrobbleSvc, nil
 }
 
-// InfoService merakit InfoRepository -> InfoService secara lazy.
 func (a *App) InfoService() (*service.InfoService, error) {
 	if a.infoSvc != nil {
 		return a.infoSvc, nil
@@ -156,7 +191,6 @@ func (a *App) InfoService() (*service.InfoService, error) {
 	return a.infoSvc, nil
 }
 
-// LatestService merakit LatestRepository -> LatestService secara lazy.
 func (a *App) LatestService() (*service.LatestService, error) {
 	if a.latestSvc != nil {
 		return a.latestSvc, nil
@@ -177,7 +211,6 @@ func (a *App) LatestService() (*service.LatestService, error) {
 	return a.latestSvc, nil
 }
 
-// LibraryService merakit LibraryRepository -> LibraryService secara lazy.
 func (a *App) LibraryService() (*service.LibraryService, error) {
 	if a.librarySvc != nil {
 		return a.librarySvc, nil
@@ -198,7 +231,6 @@ func (a *App) LibraryService() (*service.LibraryService, error) {
 	return a.librarySvc, nil
 }
 
-// ResolverService merakit ResolverRepository + TrackRepository -> ResolverService secara lazy.
 func (a *App) ResolverService() (*service.ResolverService, error) {
 	if a.resolverSvc != nil {
 		return a.resolverSvc, nil
@@ -225,7 +257,6 @@ func (a *App) ResolverService() (*service.ResolverService, error) {
 	return a.resolverSvc, nil
 }
 
-// StatsService merakit StatsRepository + TrackRepository -> StatsService secara lazy.
 func (a *App) StatsService() (*service.StatsService, error) {
 	if a.statsSvc != nil {
 		return a.statsSvc, nil
@@ -247,7 +278,6 @@ func (a *App) StatsService() (*service.StatsService, error) {
 	return a.statsSvc, nil
 }
 
-// TopService merakit TopRepository -> TopService secara lazy.
 func (a *App) TopService() (*service.TopService, error) {
 	if a.topSvc != nil {
 		return a.topSvc, nil
@@ -268,12 +298,20 @@ func (a *App) TopService() (*service.TopService, error) {
 	return a.topSvc, nil
 }
 
-// Close menutup koneksi database apabila sempat dibuka selama eksekusi command.
+// Close menutup seluruh koneksi database (lokal maupun remote) yang sempat dibuka.
 func (a *App) Close() error {
+	var errs []error
 	if a.db != nil {
-		err := a.db.Close()
+		if err := a.db.Close(); err != nil {
+			errs = append(errs, err)
+		}
 		a.db = nil
-		return err
 	}
-	return nil
+	if a.remoteDB != nil {
+		if err := a.remoteDB.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		a.remoteDB = nil
+	}
+	return errors.Join(errs...)
 }

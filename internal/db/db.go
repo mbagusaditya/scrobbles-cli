@@ -4,24 +4,41 @@ import (
 	"database/sql"
 	"fmt"
 
-	_ "github.com/tursodatabase/libsql-client-go/libsql"
-
 	"github.com/mbagusaditya/scrobbles-cli/internal/config"
 )
 
-// Connect membuka koneksi ke database Turso menggunakan native driver
-// libsql-client-go (tanpa CGO). Auth token dikirim sebagai query
-// parameter pada DSN, sesuai format yang diharapkan driver ini.
-func Connect(cfg *config.Config) (*sql.DB, error) {
-	dsn := fmt.Sprintf("%s?authToken=%s", cfg.DatabaseURL, cfg.DatabaseAuthToken)
+// Driver mendefinisikan antarmuka standar untuk setiap implementasi database spesifik.
+type Driver interface {
+	Name() string
+	Open() (*sql.DB, error)
+}
 
-	database, err := sql.Open("libsql", dsn)
+// OpenLocal membuka koneksi database SQLite lokal dan memastikan skema tabel tersedia.
+func OpenLocal(cfg *config.Config) (*sql.DB, error) {
+	driver := NewSQLiteDriver(cfg.LocalDBPath)
+	database, err := driver.Open()
 	if err != nil {
-		return nil, fmt.Errorf("gagal membuka koneksi ke Turso: %w", err)
+		return nil, err
 	}
 
-	if err := database.Ping(); err != nil {
-		return nil, fmt.Errorf("gagal melakukan ping ke Turso (cek DATABASE_URL/DATABASE_AUTH_TOKEN): %w", err)
+	if err := EnsureSchema(database); err != nil {
+		_ = database.Close()
+		return nil, fmt.Errorf("gagal inisialisasi skema SQLite lokal: %w", err)
+	}
+
+	return database, nil
+}
+
+// OpenRemote memvalidasi kredensial Turso lalu membuka koneksi ke Turso Cloud.
+func OpenRemote(cfg *config.Config) (*sql.DB, error) {
+	if err := cfg.ValidateRemote(); err != nil {
+		return nil, err
+	}
+
+	driver := NewTursoDriver(cfg.DatabaseURL, cfg.DatabaseAuthToken)
+	database, err := driver.Open()
+	if err != nil {
+		return nil, err
 	}
 
 	return database, nil
