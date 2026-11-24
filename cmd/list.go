@@ -2,9 +2,7 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 
-	"github.com/mattn/go-runewidth"
 	"github.com/spf13/cobra"
 
 	"github.com/mbagusaditya/scrobbles-cli/internal/model"
@@ -62,19 +60,11 @@ func init() {
 
 func runLibraryList(cmd *cobra.Command, targetType string) error {
 	ctx := cmd.Context()
+	limit, page := normalizePagination(listLimit, listPage, 50, 200)
 
-	// 1. Clamping limit dan normalisasi page
-	limit := listLimit
-	if limit > 200 {
-		fmt.Fprintln(os.Stderr, "⚠️  Limit melebihi batas, disesuaikan ke maksimal 200.")
-		limit = 200
-	} else if limit <= 0 {
-		limit = 50
-	}
-
-	page := listPage
-	if page <= 0 {
-		page = 1
+	librarySvc, err := app.LibraryService()
+	if err != nil {
+		return humanizeError(err)
 	}
 
 	filter := model.LibraryFilter{
@@ -82,14 +72,7 @@ func runLibraryList(cmd *cobra.Command, targetType string) error {
 		Limit: limit,
 	}
 
-	// 2. Eksekusi query service berdasarkan tipe
 	var result *model.LibraryResult
-
-	librarySvc, err := app.LibraryService()
-	if err != nil {
-		return humanizeError(err)
-	}
-
 	switch targetType {
 	case "Artist":
 		result, err = librarySvc.ListLibraryArtists(ctx, filter)
@@ -103,7 +86,6 @@ func runLibraryList(cmd *cobra.Command, targetType string) error {
 		return humanizeError(err)
 	}
 
-	// 3. Tangani hasil kosong
 	if result.TotalItems == 0 {
 		fmt.Printf("Pustaka %s masih kosong. Belum ada scrobble yang tersimpan.\n", targetType)
 		return nil
@@ -114,22 +96,14 @@ func runLibraryList(cmd *cobra.Command, targetType string) error {
 		return nil
 	}
 
-	// 4. Header katalog
 	fmt.Printf("=== Library %ss (A-Z) ===\n\n", targetType)
 
-	// Hitung padding visual kolom dinamis untuk menangani karakter CJK
-	maxColWidth := 25
-	for _, item := range result.Items {
-		w := runewidth.StringWidth(item.Name)
-		if w > maxColWidth {
-			maxColWidth = w
-		}
+	names := make([]string, len(result.Items))
+	for i, item := range result.Items {
+		names[i] = item.Name
 	}
-	if maxColWidth > 45 {
-		maxColWidth = 45
-	}
+	maxColWidth := calcColumnWidth(names, 25, 45)
 
-	// Hitung nomor awal berdasarkan offset halaman
 	startIndex := (page-1)*limit + 1
 
 	for i, item := range result.Items {
@@ -138,13 +112,12 @@ func runLibraryList(cmd *cobra.Command, targetType string) error {
 		formattedPlays := formatNumber(item.TotalPlays)
 
 		if item.Detail != "" {
-			fmt.Printf(" %3d.  %s  by %-20s  %5s plays\n", rowNumber, paddedName, item.Detail, formattedPlays)
+			fmt.Printf(" %3d.  %s  by %s  %5s plays\n", rowNumber, paddedName, padRight(item.Detail, 20), formattedPlays)
 		} else {
 			fmt.Printf(" %3d.  %s  %5s plays\n", rowNumber, paddedName, formattedPlays)
 		}
 	}
 
-	// 5. Footer informasi paginasi
 	startItem := startIndex
 	endItem := startIndex + len(result.Items) - 1
 

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/mbagusaditya/scrobbles-cli/internal/service"
 	"github.com/spf13/cobra"
 )
 
@@ -12,7 +11,6 @@ var (
 	aliasArtist string
 	aliasFrom   string
 	aliasTo     string
-	aliasSvc    *service.AliasService
 )
 
 var aliasCmd = &cobra.Command{
@@ -20,30 +18,17 @@ var aliasCmd = &cobra.Command{
 	Short: "Mengelola pemetaan alias judul lagu lokal (aliases.json)",
 	Long: `Mengelola aturan normalisasi judul track pada file JSON lokal (~/.config/scrobbles/aliases.json)
 untuk menggabungkan statistik lagu duplikat (misal variasi Kanji vs Romaji) tanpa mengubah database.`,
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// PENTING: Jika rootCmd juga punya PersistentPreRunE, panggil dulu agar tidak tertimpa
-		if rootCmd.PersistentPreRunE != nil {
-			if err := rootCmd.PersistentPreRunE(cmd, args); err != nil {
-				return err
-			}
-		}
-
-		var err error
-
-		aliasSvc, err = app.AliasService()
-
-		if err != nil {
-			return humanizeError(err)
-		}
-
-		return nil
-	},
 }
 
 var aliasListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "Menampilkan daftar aturan alias yang aktif",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		aliasSvc, err := app.AliasService()
+		if err != nil {
+			return humanizeError(err)
+		}
+
 		aliases := aliasSvc.ListTrackAliases()
 		fmt.Printf("File konfigurasi: %s\n\n", aliasSvc.ConfigPath())
 
@@ -65,6 +50,11 @@ var aliasAddCmd = &cobra.Command{
 	Short:   "Menambahkan aturan alias judul lagu baru",
 	Example: `  scrobbles alias add -a "MyGO!!!!!" --from "孤壊牢 - KOKORO" --to "孤壊牢"`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		aliasSvc, err := app.AliasService()
+		if err != nil {
+			return humanizeError(err)
+		}
+
 		if err := aliasSvc.AddTrackAlias(aliasArtist, aliasFrom, aliasTo); err != nil {
 			return humanizeError(err)
 		}
@@ -85,6 +75,11 @@ var aliasRemoveCmd = &cobra.Command{
 			return fmt.Errorf("nomor indeks harus berupa angka: %w", err)
 		}
 
+		aliasSvc, err := app.AliasService()
+		if err != nil {
+			return humanizeError(err)
+		}
+
 		removed, err := aliasSvc.RemoveTrackAlias(idx)
 		if err != nil {
 			return humanizeError(err)
@@ -95,28 +90,11 @@ var aliasRemoveCmd = &cobra.Command{
 	},
 }
 
-/*
-// Subcommand apply (mutasi ke Turso DB) dinonaktifkan sementara.
-var aliasApplyCmd = &cobra.Command{
-	Use:   "apply",
-	Short: "Menerapkan aturan aliases.json ke data historis di database",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		updated, err := app.aliasService.ApplyToDatabase(cmd.Context())
-		if err != nil {
-			return humanizeError(err)
-		}
-		fmt.Printf("✅ Berhasil menormalisasi %d baris scrobble di database.\n", updated)
-		return nil
-	},
-}
-*/
-
 func init() {
 	rootCmd.AddCommand(aliasCmd)
 	aliasCmd.AddCommand(aliasListCmd)
 	aliasCmd.AddCommand(aliasAddCmd)
 	aliasCmd.AddCommand(aliasRemoveCmd)
-	// aliasCmd.AddCommand(aliasApplyCmd)
 
 	aliasAddCmd.Flags().StringVarP(&aliasArtist, "artist", "a", "", "Nama artis (wajib)")
 	aliasAddCmd.Flags().StringVar(&aliasFrom, "from", "", "Judul lagu varian/lama yang ingin digabung (wajib)")

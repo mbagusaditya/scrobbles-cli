@@ -84,86 +84,30 @@ func init() {
 
 func runSync(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
+
+	fromTime, toTime, _, err := parsePeriodRange(syncFrom, syncTo, syncDay, syncWeek, syncMonth, false)
+	if err != nil {
+		return err
+	}
+
 	now := time.Now()
-
-	// 1. Validasi mutual exclusion untuk preset flags
-	presetCount := 0
-	if syncDay {
-		presetCount++
-	}
-	if syncWeek {
-		presetCount++
-	}
-	if syncMonth {
-		presetCount++
-	}
-
-	if presetCount > 1 {
-		return fmt.Errorf("pilih salah satu preset saja: --day, --week, atau --month")
-	}
-
-	if presetCount == 1 && (syncFrom != "" || syncTo != "") {
-		return fmt.Errorf("flag preset (--day/--week/--month) tidak dapat digabung dengan --from atau --to")
-	}
-
-	// 2. Logika penentuan rentang waktu
-	var fromTime, toTime time.Time
 	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
 	todayEnd := time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 0, time.Local)
 
-	switch {
-	case syncDay:
+	if fromTime.IsZero() && toTime.IsZero() {
+		// Default tanpa flag: sync hari ini penuh
 		fromTime = todayStart
 		toTime = todayEnd
-
-	case syncWeek:
-		// Rolling 7 hari ke belakang sampai akhir hari ini
-		fromTime = todayStart.AddDate(0, 0, -6)
+	} else if !fromTime.IsZero() && toTime.IsZero() {
+		// Hanya --from diisi: otomatis tarik sampai akhir hari ini
 		toTime = todayEnd
-
-	case syncMonth:
-		// Sejak tanggal 1 bulan berjalan
-		fromTime = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.Local)
-		toTime = todayEnd
-
-	case syncFrom == "" && syncTo == "":
-		// Default: jika semua flag kosong, sync hari ini penuh
-		fromTime = todayStart
-		toTime = todayEnd
-
-	default:
-		// Parsing --from jika disediakan
-		if syncFrom != "" {
-			t, err := time.ParseInLocation("2006-01-02", syncFrom, time.Local)
-			if err != nil {
-				return fmt.Errorf("format flag --from tidak valid (gunakan YYYY-MM-DD): %w", err)
-			}
-			fromTime = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.Local)
-		}
-
-		// Parsing --to jika disediakan
-		if syncTo != "" {
-			t, err := time.ParseInLocation("2006-01-02", syncTo, time.Local)
-			if err != nil {
-				return fmt.Errorf("format flag --to tidak valid (gunakan YYYY-MM-DD): %w", err)
-			}
-			toTime = time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 0, time.Local)
-		}
-
-		// Jika hanya --from yang diisi, --to otomatis ke akhir hari ini
-		if syncFrom != "" && syncTo == "" {
-			toTime = todayEnd
-		}
-		// Jika hanya --to yang diisi, fromTime tetap zero value
-		// agar service mengambil dari scrobble terakhir di DB.
 	}
 
-	// 3. Validasi rentang tanggal jika keduanya terisi
-	if !fromTime.IsZero() && !toTime.IsZero() && fromTime.After(toTime) {
-		return fmt.Errorf("rentang tanggal tidak valid: --from tidak boleh lebih baru dari --to")
+	scrobbleSvc, err := app.ScrobbleService()
+	if err != nil {
+		return humanizeError(err)
 	}
 
-	// 4. Tampilkan informasi rentang waktu sinkronisasi ke user
 	fmt.Println("Memulai sinkronisasi scrobble...")
 	if fromTime.IsZero() {
 		fmt.Printf("Rentang: [Scrobble terakhir di DB] s.d. %s\n\n", toTime.Format("2006-01-02 15:04:05"))
@@ -171,7 +115,6 @@ func runSync(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Rentang: %s s.d. %s\n\n", fromTime.Format("2006-01-02 15:04:05"), toTime.Format("2006-01-02 15:04:05"))
 	}
 
-	// Nyalakan loading spinner awal
 	sp := startSpinner("Menghubungi Last.fm API...")
 	defer func() {
 		sp.stopSpinner()
@@ -186,11 +129,6 @@ func runSync(cmd *cobra.Command, args []string) error {
 		if p.Page < p.TotalPages {
 			sp = startSpinner(fmt.Sprintf("Mengambil halaman %d/%d...", p.Page+1, p.TotalPages))
 		}
-	}
-
-	scrobbleSvc, err := app.ScrobbleService()
-	if err != nil {
-		return humanizeError(err)
 	}
 
 	result, err := scrobbleSvc.FetchRange(ctx, fromTime, toTime, onProgress)

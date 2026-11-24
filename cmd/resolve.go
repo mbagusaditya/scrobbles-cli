@@ -25,12 +25,18 @@ Gunakan --durations (-d) untuk mengambil metadata durasi lagu dari Last.fm API.`
 func init() {
 	rootCmd.AddCommand(resolveCmd)
 
-	resolveCmd.Flags().IntVarP(&resolveBatchSize, "batch-size", "b", 500, "Jumlah kombinasi lagu unik yang diproses per batch transaksi")
+	resolveCmd.Flags().IntVarP(&resolveBatchSize, "batch-size", "b", 500, "Jumlah kombinasi lagu unik yang diproses per batch transaksi (default 500, max 5000)")
 	resolveCmd.Flags().BoolVarP(&resolveDurations, "durations", "d", false, "Ambil durasi lagu aktual dari Last.fm untuk track yang durasinya masih kosong")
 }
 
 func runResolve(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
+	batchSize := normalizeLimit(resolveBatchSize, 500, 5000)
+
+	resolverSvc, err := app.ResolverService()
+	if err != nil {
+		return humanizeError(err)
+	}
 
 	fmt.Println("Memeriksa scrobble logs yang belum terhubung (unlinked)...")
 
@@ -41,12 +47,7 @@ func runResolve(cmd *cobra.Command, args []string) error {
 		batchIndex++
 	}
 
-	resolverSvc, err := app.ResolverService()
-	if err != nil {
-		return humanizeError(err)
-	}
-
-	res, err := resolverSvc.ResolveUnlinkedScrobbles(ctx, resolveBatchSize, onProgress)
+	res, err := resolverSvc.ResolveUnlinkedScrobbles(ctx, batchSize, onProgress)
 	if err != nil {
 		return humanizeError(err)
 	}

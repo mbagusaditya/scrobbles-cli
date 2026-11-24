@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -64,35 +63,9 @@ func init() {
 func runInfo(cmd *cobra.Command, targetType, query string) error {
 	ctx := cmd.Context()
 
-	// 1. Parsing & validasi filter tanggal terlebih dahulu sebelum menyentuh DB
-	var fromTime, toTime time.Time
-	periodLabel := "All Time"
-
-	if infoFrom != "" {
-		t, err := time.ParseInLocation("2006-01-02", infoFrom, time.Local)
-		if err != nil {
-			return fmt.Errorf("format flag --from tidak valid (gunakan YYYY-MM-DD): %w", err)
-		}
-		fromTime = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.Local)
-	}
-
-	if infoTo != "" {
-		t, err := time.ParseInLocation("2006-01-02", infoTo, time.Local)
-		if err != nil {
-			return fmt.Errorf("format flag --to tidak valid (gunakan YYYY-MM-DD): %w", err)
-		}
-		toTime = time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 0, time.Local)
-	}
-
-	if !fromTime.IsZero() && !toTime.IsZero() {
-		if fromTime.After(toTime) {
-			return fmt.Errorf("rentang tanggal tidak valid: --from tidak boleh lebih baru dari --to")
-		}
-		periodLabel = fmt.Sprintf("%s s.d. %s", fromTime.Format("2006-01-02"), toTime.Format("2006-01-02"))
-	} else if !fromTime.IsZero() {
-		periodLabel = fmt.Sprintf("Sejak %s", fromTime.Format("2006-01-02"))
-	} else if !toTime.IsZero() {
-		periodLabel = fmt.Sprintf("Hingga %s", toTime.Format("2006-01-02"))
+	fromTime, toTime, periodLabel, err := parseDateRange(infoFrom, infoTo)
+	if err != nil {
+		return err
 	}
 
 	filter := model.InfoFilter{
@@ -102,7 +75,6 @@ func runInfo(cmd *cobra.Command, targetType, query string) error {
 		To:     toTime,
 	}
 
-	// 2. Lazy init InfoService (koneksi DB baru dibuka di titik ini)
 	infoSvc, err := app.InfoService()
 	if err != nil {
 		return humanizeError(err)
@@ -122,7 +94,6 @@ func runInfo(cmd *cobra.Command, targetType, query string) error {
 		return humanizeError(err)
 	}
 
-	// 3. Render Output ke Terminal
 	fmt.Printf("=== %s Info: %s ===\n\n", res.Type, res.Name)
 
 	fmt.Println("--- Global Metadata (Last.fm) ---")

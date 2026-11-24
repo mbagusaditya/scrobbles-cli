@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -41,94 +40,10 @@ func init() {
 
 func runStats(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	now := time.Now()
 
-	// 1. Validasi mutual exclusion untuk preset flag
-	presetCount := 0
-	if statsDay {
-		presetCount++
-	}
-	if statsWeek {
-		presetCount++
-	}
-	if statsMonth {
-		presetCount++
-	}
-	if statsYear {
-		presetCount++
-	}
-
-	if presetCount > 1 {
-		return fmt.Errorf("pilih salah satu preset saja: --day, --week, --month, atau --year")
-	}
-
-	if presetCount == 1 && (statsFrom != "" || statsTo != "") {
-		return fmt.Errorf("flag preset (--day/--week/--month/--year) tidak dapat digabung dengan --from atau --to")
-	}
-
-	// 2. Tentukan batas waktu [from, to]
-	var fromTime, toTime time.Time
-	periodLabel := "All Time"
-
-	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
-	todayEnd := time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 0, time.Local)
-
-	switch {
-	case statsDay:
-		fromTime = todayStart
-		toTime = todayEnd
-		periodLabel = fmt.Sprintf("Hari Ini (%s)", now.Format("2006-01-02"))
-
-	case statsWeek:
-		// 7 hari terakhir bergulir (rolling 7 days) s.d. akhir hari ini
-		fromTime = todayStart.AddDate(0, 0, -6)
-		toTime = todayEnd
-		periodLabel = fmt.Sprintf("7 Hari Terakhir (%s s.d. %s)", fromTime.Format("2006-01-02"), toTime.Format("2006-01-02"))
-
-	case statsMonth:
-		fromTime = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.Local)
-		toTime = todayEnd
-		periodLabel = fmt.Sprintf("Bulan Ini (%s s.d. %s)", fromTime.Format("2006-01-02"), toTime.Format("2006-01-02"))
-
-	case statsYear:
-		fromTime = time.Date(now.Year(), time.January, 1, 0, 0, 0, 0, time.Local)
-		toTime = todayEnd
-		periodLabel = fmt.Sprintf("Tahun Ini (%s s.d. %s)", fromTime.Format("2006-01-02"), toTime.Format("2006-01-02"))
-
-	default:
-		// Custom range via --from dan/atau --to
-		if statsFrom != "" {
-			t, err := time.ParseInLocation("2006-01-02", statsFrom, time.Local)
-			if err != nil {
-				return fmt.Errorf("format flag --from tidak valid (gunakan YYYY-MM-DD): %w", err)
-			}
-			fromTime = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.Local)
-		}
-
-		if statsTo != "" {
-			t, err := time.ParseInLocation("2006-01-02", statsTo, time.Local)
-			if err != nil {
-				return fmt.Errorf("format flag --to tidak valid (gunakan YYYY-MM-DD): %w", err)
-			}
-			toTime = time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 0, time.Local)
-		}
-
-		if !fromTime.IsZero() && !toTime.IsZero() {
-			if fromTime.After(toTime) {
-				return fmt.Errorf("rentang tanggal tidak valid: --from tidak boleh lebih baru dari --to")
-			}
-			periodLabel = fmt.Sprintf("%s s.d. %s", fromTime.Format("2006-01-02"), toTime.Format("2006-01-02"))
-		} else if !fromTime.IsZero() {
-			periodLabel = fmt.Sprintf("Sejak %s", fromTime.Format("2006-01-02"))
-		} else if !toTime.IsZero() {
-			periodLabel = fmt.Sprintf("Hingga %s", toTime.Format("2006-01-02"))
-		}
-	}
-
-	// 3. Panggil query statistik via service
-	filter := model.StatsFilter{
-		From: fromTime,
-		To:   toTime,
+	fromTime, toTime, periodLabel, err := parsePeriodRange(statsFrom, statsTo, statsDay, statsWeek, statsMonth, statsYear)
+	if err != nil {
+		return err
 	}
 
 	statsSvc, err := app.StatsService()
@@ -136,7 +51,10 @@ func runStats(cmd *cobra.Command, args []string) error {
 		return humanizeError(err)
 	}
 
-	stats, err := statsSvc.GetStats(ctx, filter)
+	stats, err := statsSvc.GetStats(ctx, model.StatsFilter{
+		From: fromTime,
+		To:   toTime,
+	})
 	if err != nil {
 		return humanizeError(err)
 	}
@@ -148,7 +66,6 @@ func runStats(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// 4. Kalkulasi metrik turunan dari akumulasi TotalDurationMs
 	totalHours := float64(stats.TotalDurationMs) / (1000.0 * 60.0 * 60.0)
 	totalDaysListening := totalHours / 24.0
 
@@ -157,7 +74,6 @@ func runStats(cmd *cobra.Command, args []string) error {
 		activeRatio = (float64(stats.ActiveDays) / float64(stats.TotalDays)) * 100.0
 	}
 
-	// 5. Render output ke terminal
 	fmt.Println("=== Scrobbles Statistics ===")
 	if periodLabel == "All Time" && !stats.FirstScrobble.IsZero() {
 		fmt.Printf("Periode           : All Time (%s s.d. %s)\n\n",
@@ -197,30 +113,4 @@ func runStats(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Repeat Ratio      : %.1fx per track\n", stats.RepeatRatio)
 
 	return nil
-}
-
-// formatNumber memformat angka integer dengan pemisah ribuan titik (1234567 -> 1.234.567)
-func formatNumber(n int) string {
-	if n < 0 {
-		return fmt.Sprintf("-%s", formatNumber(-n))
-	}
-	s := fmt.Sprintf("%d", n)
-	if len(s) <= 3 {
-		return s
-	}
-
-	var res []byte
-	rem := len(s) % 3
-	if rem > 0 {
-		res = append(res, s[:rem]...)
-	}
-
-	for i := rem; i < len(s); i += 3 {
-		if len(res) > 0 {
-			res = append(res, '.')
-		}
-		res = append(res, s[i:i+3]...)
-	}
-
-	return string(res)
 }

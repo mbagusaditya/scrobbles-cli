@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/mattn/go-runewidth"
 	"github.com/spf13/cobra"
 
 	"github.com/mbagusaditya/scrobbles-cli/internal/model"
@@ -11,15 +10,21 @@ import (
 
 var latestLimit int
 
-// latestCmd bertindak sebagai parent command
 var latestCmd = &cobra.Command{
-	Use:   "latest [artist|album|track]",
+	Use:   "latest [track|artist|album]",
 	Short: "Menampilkan riwayat entitas yang paling baru diputar",
 	Long: `Menampilkan daftar unik artist, album, atau track yang paling baru didengarkan.
 Pilih salah satu subperintah: artist, album, atau track.
 Jika dipanggil tanpa subperintah, default akan menampilkan track lagu terbaru.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Fallback default jika user hanya mengetik `scrobbles latest`
+		return runLatest(cmd, "Track")
+	},
+}
+
+var latestTrackCmd = &cobra.Command{
+	Use:   "track",
+	Short: "Menampilkan daftar track lagu terakhir yang didengarkan",
+	RunE: func(cmd *cobra.Command, args []string) error {
 		return runLatest(cmd, "Track")
 	},
 }
@@ -40,41 +45,32 @@ var latestAlbumCmd = &cobra.Command{
 	},
 }
 
-var latestTrackCmd = &cobra.Command{
-	Use:   "track",
-	Short: "Menampilkan daftar track lagu terakhir yang didengarkan",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runLatest(cmd, "Track")
-	},
-}
-
 func init() {
 	rootCmd.AddCommand(latestCmd)
+	latestCmd.AddCommand(latestTrackCmd)
 	latestCmd.AddCommand(latestArtistCmd)
 	latestCmd.AddCommand(latestAlbumCmd)
-	latestCmd.AddCommand(latestTrackCmd)
 
-	// PersistentFlags agar flag limit otomatis berlaku di latest maupun anak perintahnya
-	latestCmd.PersistentFlags().IntVarP(&latestLimit, "limit", "n", 10, "Jumlah data yang ditampilkan")
+	latestCmd.PersistentFlags().IntVarP(&latestLimit, "limit", "n", 10, "Jumlah data yang ditampilkan (default 10, max 100)")
 }
 
 func runLatest(cmd *cobra.Command, targetType string) error {
 	ctx := cmd.Context()
-
-	var items []model.LatestItem
+	limit := normalizeLimit(latestLimit, 10, 100)
 
 	latestSvc, err := app.LatestService()
 	if err != nil {
 		return humanizeError(err)
 	}
 
+	var items []model.LatestItem
 	switch targetType {
 	case "Artist":
-		items, err = latestSvc.GetLatestArtists(ctx, latestLimit)
+		items, err = latestSvc.GetLatestArtists(ctx, limit)
 	case "Album":
-		items, err = latestSvc.GetLatestAlbums(ctx, latestLimit)
+		items, err = latestSvc.GetLatestAlbums(ctx, limit)
 	case "Track":
-		items, err = latestSvc.GetLatestTracks(ctx, latestLimit)
+		items, err = latestSvc.GetLatestTracks(ctx, limit)
 	}
 
 	if err != nil {
@@ -86,26 +82,18 @@ func runLatest(cmd *cobra.Command, targetType string) error {
 		return nil
 	}
 
-	// Render tabel dengan padRight
-	fmt.Printf("=== Latest %d %s ===\n\n", len(items), targetType)
+	fmt.Printf("=== Latest %d %ss ===\n\n", len(items), targetType)
 
-	maxColWidth := 25
-	for _, item := range items {
-		w := runewidth.StringWidth(item.Name)
-		if w > maxColWidth {
-			maxColWidth = w
-		}
+	names := make([]string, len(items))
+	for i, item := range items {
+		names[i] = item.Name
 	}
-	if maxColWidth > 45 {
-		maxColWidth = 45
-	}
+	maxColWidth := calcColumnWidth(names, 25, 45)
 
 	for i, item := range items {
 		timeStr := item.PlayedAt.Format("2006-01-02 15:04")
-		paddedName := padRight(item.Name, maxColWidth)
-
 		if item.Detail != "" {
-			fmt.Printf(" %2d.  %s  %s  by %s\n", i+1, timeStr, paddedName, item.Detail)
+			fmt.Printf(" %2d.  %s  %s  by %s\n", i+1, timeStr, padRight(item.Name, maxColWidth), item.Detail)
 		} else {
 			fmt.Printf(" %2d.  %s  %s\n", i+1, timeStr, item.Name)
 		}
